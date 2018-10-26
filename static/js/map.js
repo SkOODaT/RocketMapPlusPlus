@@ -1462,8 +1462,7 @@ function updateGymMarker(item, marker) {
 }
 
 function setupPokestopMarker(item) {
-    var imagename = item['lure_expiration'] ? 'PokestopLured' : 'Pokestop'
-    imagename += hasPokestopNearby(item['pokestop_id'])
+    var imagename = item['lure_expiration'] ? 'PokestopLured' : item['lure_expiration'] & item['pokemon']['0'] ? 'PokestopLured_Nearby' : item['pokemon']['0'] ? 'Pokestop_Nearby' : 'Pokestop'
     var image = {
         url: 'static/images/pokestop/' + imagename + '.png',
         scaledSize: new google.maps.Size(32, 32)
@@ -2761,26 +2760,6 @@ function showPokestopDetails(id) { // eslint-disable-line no-unused-vars
             sidebar.classList.remove('visible')
         })
     })
-}
-
-function hasPokestopNearby(id) { // eslint-disable-line no-unused-vars
-    var data = $.ajax({
-        url: 'pokestop_data',
-        type: 'GET',
-        data: {
-            'id': id
-        },
-        dataType: 'json',
-        cache: false
-    })
-
-    var output = ''
-    data.done(function (result) {
-        if (result.pokemon.length) {
-            output = '_Nearby'
-        }
-    })
-    return output
 }
 
 function getSidebarPokestopMember(pokemon) {
