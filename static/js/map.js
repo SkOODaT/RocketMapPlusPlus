@@ -81,6 +81,7 @@ const cryFileTypes = ['wav', 'mp3']
 
 const genderType = ['♂', '♀', '⚲']
 const forms = ['unset', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', '!', '?', '👤', '☀️', '☔️', '⛄️', '👤', '⚔️', '🛡️', '⚡️']
+const costumes = ['unset', 'Santa', 'Party', 'Ash', 'Witch', 'Summer', 'Fall']
 const pokemonWithImages = [
     1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 26, 28, 31, 34, 38,
     49, 57, 59, 62, 65, 68, 71, 73, 76, 80, 82, 87,
@@ -584,6 +585,7 @@ function pokemonLabel(item) {
     var height = item['height']
     var gender = item['gender']
     var form = item['form']
+	var costume = item['costume']
     var cp = item['cp']
     var cpMultiplier = item['cp_multiplier']
     var weatherBoostedCondition = item['weather_boosted_condition']
@@ -607,9 +609,14 @@ function pokemonLabel(item) {
         formString += `(${forms[item['form']]})`
     }
 
+	var costumeString = ''
+	if (costume !== null && costume > 0 && costumes.length > costume) {
+        costumeString += `(${costumes[item['costume']]})`
+    }
+	
     contentstring += `
     <div class='pokemon name'>
-      ${name} <span class='pokemon name pokedex'><a href='http://pokemon.gameinfo.io/en/pokemon/${id}' target='_blank' title='View in Pokédex'>#${id}</a></span> ${formString} <span class='pokemon gender rarity'>${genderType[gender - 1]} ${rarityDisplay}</span> ${typesDisplay} ${weatherDisplay}
+        ${costumeString} ${name} ${formString} <span class='pokemon name pokedex'><a href='http://pokemon.gameinfo.io/en/pokemon/${id}' target='_blank' title='View in Pokédex'>#${id}</a></span> <span class='pokemon gender rarity'>${genderType[gender - 1]} ${rarityDisplay}</span> ${typesDisplay} ${weatherDisplay}
     </div>`
 
     var iconname = `${id}`
@@ -621,8 +628,12 @@ function pokemonLabel(item) {
                 iconname += `_A`
             }
         }
+	} else if (costume > 0) {
+        if (costume < 37) {
+            iconname += `_${costume}`
+		}
     } else {
-        if (genderSpecificSprites.indexOf(id) !== -1) {
+        if (item['pokemon_id'] == 1000 && genderSpecificSprites.indexOf(id) !== -1) {
             if (gender == 1) {
                 iconname += '_M'
             } else {
@@ -896,8 +907,12 @@ function gymLabel(gym, includeMembers = true) {
                         iconname += `_A`
                     }
                 }
+			} else if (member.costume > 0) {
+				if (member.costume < 37) {
+					iconname += `_${member.costume}`
+				}
             } else {
-                if (genderSpecificSprites.indexOf(member.pokemon_id) !== -1) {
+                if (member.pokemon_id == 1000 && genderSpecificSprites.indexOf(member.pokemon_id) !== -1) {
                     if (member.gender == 1) {
                         iconname += '_M'
                     } else {
@@ -964,8 +979,12 @@ function pokestopLabel(pokestop, includeMembers = true) {
                         iconname += `_A`
                     }
                 }
+			} else if (member.costume > 0) {
+				if (member.costume < 37) {
+					iconname += `_${member.costume}`
+				}
             } else {
-                if (genderSpecificSprites.indexOf(member.pokemon_id) !== -1) {
+                if (member.pokemon_id == 1000 && genderSpecificSprites.indexOf(member.pokemon_id) !== -1) {
                     if (member.gender == 1) {
                         iconname += '_M'
                     } else {
@@ -1309,8 +1328,12 @@ function customizePokemonMarker(marker, item, skipNotification) {
                 iconname += '_A'
             }
         }
+	} else if (item['costume'] > 0) {
+		if (item['costume'] < 37) {
+			iconname += '_' + item['costume']
+		}
     } else {
-        if (genderSpecificSprites.indexOf(item['pokemon_id']) !== -1) {
+        if (item['pokemon_id'] == 1000 && genderSpecificSprites.indexOf(item['pokemon_id']) !== -1) {
             if (item['gender'] == 1) {
                 iconname += '_M'
             } else {
@@ -2625,8 +2648,12 @@ function getSidebarGymMember(pokemon) {
                 iconname += `_A`
             }
         }
+	} else if (pokemon.costume > 0) {
+        if (pokemon.costume < 37) {
+            iconname += `_${pokemon.costume}`
+		}
     } else {
-        if (genderSpecificSprites.indexOf(pokemon.pokemon_id) !== -1) {
+        if (pokemon.pokemon_id == 1000 && genderSpecificSprites.indexOf(pokemon.pokemon_id) !== -1) {
             if (pokemon.gender == 1) {
                 iconname += '_M'
             } else {
@@ -2784,8 +2811,12 @@ function getSidebarPokestopMember(pokemon) {
                 iconname += `_A`
             }
         }
+	} else if (pokemon.costume > 0) {
+        if (pokemon.costume < 37) {
+            iconname += `_${pokemon.costume}`
+		}
     } else {
-        if (genderSpecificSprites.indexOf(pokemon.pokemon_id) !== -1) {
+        if (pokemon.pokemon_id == 1000 && genderSpecificSprites.indexOf(pokemon.pokemon_id) !== -1) {
             if (pokemon.gender == 1) {
                 iconname += '_M'
             } else {

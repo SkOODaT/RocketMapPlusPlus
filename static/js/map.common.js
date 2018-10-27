@@ -1221,14 +1221,18 @@ function setupPokemonMarker(item, map, isBounceDisabled, scaleByRarity = true, i
     var iconname = item['pokemon_id']
     if (item['form'] > 0) {
         if (item['form'] < 37) {
-            iconname += item['form']
+            iconname += `_` + item['form']
         } else {
             if (item['form'] % 2 == 0) {
                 iconname += `_A`
             }
         }
+	} else if (item['costume'] > 0) {
+        if (item['costume'] < 37) {
+            iconname += `_` + item['costume']
+		}
     } else {
-        if (genderSpecificSprites.indexOf(item['pokemon_id']) !== -1) {
+        if (item['pokemon_id'] == 1000 && genderSpecificSprites.indexOf(item['pokemon_id']) !== -1) {
             if (item['gender'] == 1) {
                 iconname += '_M'
             } else {
@@ -1241,7 +1245,7 @@ function setupPokemonMarker(item, map, isBounceDisabled, scaleByRarity = true, i
 
     marker.setIcon({
         url: markerImage,
-        scaledSize: new google.maps.Size(48, 48)
+        scaledSize: new google.maps.Size(38, 38)
     })
 
 
@@ -1260,14 +1264,18 @@ function updatePokemonMarker(item, map, scaleByRarity = true, isNotifyPkmn = fal
     var iconname = item['pokemon_id']
     if (item['form'] > 0) {
         if (item['form'] < 37) {
-            iconname += item['form']
+            iconname += `_` + item['form']
         } else {
             if (item['form'] % 2 == 0) {
                 iconname += `_A`
             }
         }
+	} else if (item['costume'] > 0) {
+        if (item['costume'] < 37) {
+            iconname += `_` + item['costume']
+		}
     } else {
-        if (genderSpecificSprites.indexOf(item['pokemon_id']) !== -1) {
+        if (item['pokemon_id'] == 1000 && genderSpecificSprites.indexOf(item['pokemon_id']) !== -1) {
             if (item['gender'] == 1) {
                 iconname += '_M'
             } else {
@@ -1280,7 +1288,7 @@ function updatePokemonMarker(item, map, scaleByRarity = true, isNotifyPkmn = fal
 
     marker.setIcon({
         url: markerImage,
-        scaledSize: new google.maps.Size(48, 48)
+        scaledSize: new google.maps.Size(38, 38)
     })
 
 
