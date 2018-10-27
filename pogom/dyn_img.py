@@ -10,8 +10,8 @@ log = logging.getLogger(__name__)
 
 path_icons = os.path.join('static', 'icons')
 path_images = os.path.join('static', 'images')
-path_gym = os.path.join(path_images, 'gym')
-path_raid = os.path.join(path_images, 'raid')
+path_gym = os.path.join(path_images, 'ggym')
+path_raid = os.path.join(path_images, 'graid')
 path_generated = os.path.join(path_images, 'generated')
 
 egg_images = {
@@ -59,18 +59,18 @@ def get_gym_icon(team, level, raidlevel, pkm, is_in_battle, is_ex_raid_eligible,
     # Battle Badge
     if is_in_battle:
         subject_lines.append('-gravity center ( {} -resize 84x84 ) -geometry +0+0 -composite'.format(
-            os.path.join(path_images, 'boom.png')))
+            os.path.join(path_gym, 'Battle.png')))
         out_filename = out_filename.replace('.png', '_B.png')
 
     # Ex Raid Badge
     if is_ex_raid_eligible:
         subject_lines.append('-gravity center ( {} -resize 50x50 ) -geometry +0+0 -composite'.format(
-            os.path.join(path_images, 'exraid.png')))
+            os.path.join(path_gym, 'ExRaid.png')))
         out_filename = out_filename.replace('.png', '_Ex.png')
 
     if is_unknown:
         subject_lines.append('-gravity center ( {} -resize 50x50 ) -geometry +0+0 -composite'.format(
-            os.path.join(path_images, 'unknown.png')))
+            os.path.join(path_gym, 'Unknown.png')))
         out_filename = out_filename.replace('.png', '_Unknown.png')
 		
     if not os.path.isfile(out_filename):
