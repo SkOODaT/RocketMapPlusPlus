@@ -1426,72 +1426,93 @@ function updateGymMarker(item, marker) {
     const gymExRaidEligible = getGymExRaidEligible(item)
     if (item.raid && isOngoingRaid(item.raid) && Store.get('showRaids') && raidLevelVisible) {
 		let markerImage
+		let scaleNumber
 		if (generateImages) {
 		    markerImage = 'gym_img?team=' + gymTypes[item.team_id] + '&level=' + getGymLevel(item) + '&raidlevel=' + item['raid']['level'] + '&is_unknown=1'
+			scaleNumber = 48
 			if (gymExRaidEligible) {
                 markerImage += '&ex_raid=1'
+				scaleNumber = 55
 			}
 		} else {
             markerImage = 'static/images/raid/' + gymTypes[item.team_id] + '_' + item.raid.level + '_unknown.png'
+			scaleNumber = 48
 		}
         if (generateImages && item.raid.pokemon_id) {
 			markerImage = 'gym_img?team=' + gymTypes[item.team_id] + '&level=' + getGymLevel(item) + '&raidlevel=' + item['raid']['level'] + '&pkm=' + item['raid']['pokemon_id']
+			scaleNumber = 60
 			if (gymExRaidEligible) {
                 markerImage += '&ex_raid=1'
+				scaleNumber = 60
 			}
 		} else if (pokemonWithImages.indexOf(item.raid.pokemon_id) !== -1) {
             markerImage = 'static/images/raid/' + gymTypes[item.team_id] + '_' + item['raid']['pokemon_id'] + '.png'
+			scaleNumber = 60
         }
         marker.setIcon({
             url: markerImage,
-            scaledSize: new google.maps.Size(48, 48)
+            scaledSize: new google.maps.Size(scaleNumber, scaleNumber)
         })
         marker.setZIndex(google.maps.Marker.MAX_ZINDEX + 1)
     } else if (hasActiveRaid && raidLevelVisible && showRaidSetting) {
 		let markerImage
+		let scaleNumber
 		if (generateImages) {
 			markerImage = 'gym_img?team=' + gymTypes[item.team_id] + '&level=' + getGymLevel(item) + '&raidlevel=' + item['raid']['level']
+			scaleNumber = 48
 			if (gymInBattle) {
                 markerImage += '&in_battle=1'
+				scaleNumber = 75
 			}
 			if (gymExRaidEligible) {
                 markerImage += '&ex_raid=1'
+				scaleNumber = 55
 			}
 		} else {
             markerImage = 'static/images/gym/' + gymTypes[item.team_id] + '_' + getGymLevel(item) + '_' + item['raid']['level'] + '.png'
+			scaleNumber = 48
             if (gymInBattle) {
                 markerImage = markerImage.replace('.png', '_isInBattle.png')
+				scaleNumber = 75
             }
             if (gymExRaidEligible) {
                 markerImage = markerImage.replace('.png', '_ExRaidEligible.png')
+				scaleNumber = 55
             }
 		}
         marker.setIcon({
             url: markerImage,
-            scaledSize: new google.maps.Size(48, 48)
+            scaledSize: new google.maps.Size(scaleNumber, scaleNumber)
         })
     } else {
 		let markerImage
+		let scaleNumber
 		if (generateImages) {
 			markerImage = 'gym_img?team=' + gymTypes[item.team_id] + '&level=' + getGymLevel(item)
+			scaleNumber = 48
 			if (gymInBattle) {
                 markerImage += '&in_battle=1'
+				scaleNumber = 75
 			}
 			if (gymExRaidEligible) {
                 markerImage += '&ex_raid=1'
+				scaleNumber = 55
 			}
 		} else {
             markerImage = 'static/images/gym/' + gymTypes[item.team_id] + '_' + getGymLevel(item) + '.png'
+			scaleNumber = 48
             if (gymInBattle) {
                 markerImage = markerImage.replace('.png', '_isInBattle.png')
+				scaleNumber = 75
             }
             if (gymExRaidEligible) {
                 markerImage = markerImage.replace('.png', '_ExRaidEligible.png')
+				scaleNumber = 55
             }
 		}
         marker.setIcon({
             url: markerImage,
-            scaledSize: new google.maps.Size(48, 48)
+            scaledSize: new google.maps.Size(scaleNumber, scaleNumber)
         })
         marker.setZIndex(1)
     }
