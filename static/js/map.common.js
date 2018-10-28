@@ -1146,6 +1146,19 @@ function getPokemonRarity(pokemonId) {
     return ''
 }
 
+function getPokemonIcon(item) {
+    //displayHeight = Math.max(displayHeight, 3)
+    //var scale = displayHeight / sprite.iconHeight
+    //var scaledIconSize = new google.maps.Size(scale * sprite.iconWidth, scale * sprite.iconHeight)
+    //var scaledIconOffset = new google.maps.Point(0, 0)
+    //var scaledIconCenterOffset = new google.maps.Point(scale * sprite.iconWidth / 2, scale * sprite.iconHeight / 2)
+    let weather_param = item['weather_boosted_condition'] ? `&weather=${item['weather_boosted_condition']}` : ''
+    let icon_url = `pkm_img?pkm=${item['pokemon_id']}${weather_param}`
+    
+	console.log(icon_url)
+	return icon_url
+}
+
 function getGoogleSprite(index, sprite, displayHeight) {
     displayHeight = Math.max(displayHeight, 3)
     var scale = displayHeight / sprite.iconHeight
@@ -1218,6 +1231,7 @@ function setupPokemonMarker(item, map, isBounceDisabled, scaleByRarity = true, i
         animationDisabled: isBounceDisabled
     })
 
+	let markerImage = ''
     var iconname = item['pokemon_id']
     if (item['form'] > 0) {
         if (item['form'] < 37) {
@@ -1227,22 +1241,25 @@ function setupPokemonMarker(item, map, isBounceDisabled, scaleByRarity = true, i
                 iconname += `_A`
             }
         }
+		markerImage = 'static/icons/' + iconname + '.png'
 	} else if (item['costume'] > 0) {
         if (item['costume'] < 37) {
             iconname += `_` + item['costume']
 		}
-    } else {
-        if (item['pokemon_id'] == 1000 && genderSpecificSprites.indexOf(item['pokemon_id']) !== -1) {
-            if (item['gender'] == 1) {
-                iconname += '_M'
-            } else {
-                iconname += '_F'
-            }
+		markerImage = 'static/icons/' + iconname + '.png'
+    } else if (item['pokemon_id'] == 1000 && genderSpecificSprites.indexOf(item['pokemon_id']) !== -1) {
+        if (item['gender'] == 1) {
+            iconname += '_M'
+        } else {
+            iconname += '_F'
         }
-    }
-
-    let markerImage = 'static/icons/' + iconname + '.png'
-
+		markerImage = 'static/icons/' + iconname + '.png'
+    } else if (generateImages) {
+		markerImage = getPokemonIcon(item)
+	} else {
+		markerImage = 'static/icons/' + iconname + '.png'
+	}
+    
     marker.setIcon({
         url: markerImage,
         scaledSize: new google.maps.Size(38, 38)
@@ -1261,6 +1278,7 @@ function updatePokemonMarker(item, map, scaleByRarity = true, isNotifyPkmn = fal
 
     marker.setIcon(icon)
 
+	let markerImage = ''
     var iconname = item['pokemon_id']
     if (item['form'] > 0) {
         if (item['form'] < 37) {
@@ -1270,21 +1288,24 @@ function updatePokemonMarker(item, map, scaleByRarity = true, isNotifyPkmn = fal
                 iconname += `_A`
             }
         }
+		markerImage = 'static/icons/' + iconname + '.png'
 	} else if (item['costume'] > 0) {
         if (item['costume'] < 37) {
             iconname += `_` + item['costume']
 		}
-    } else {
-        if (item['pokemon_id'] == 1000 && genderSpecificSprites.indexOf(item['pokemon_id']) !== -1) {
-            if (item['gender'] == 1) {
-                iconname += '_M'
-            } else {
-                iconname += '_F'
-            }
+		markerImage = 'static/icons/' + iconname + '.png'
+    } else if (item['pokemon_id'] == 1000 && genderSpecificSprites.indexOf(item['pokemon_id']) !== -1) {
+        if (item['gender'] == 1) {
+            iconname += '_M'
+        } else {
+            iconname += '_F'
         }
-    }
-
-    let markerImage = 'static/icons/' + iconname + '.png'
+		markerImage = 'static/icons/' + iconname + '.png'
+    } else if (generateImages) {
+		markerImage = getPokemonIcon(item)
+	} else {
+		markerImage = 'static/icons/' + iconname + '.png'
+	}
 
     marker.setIcon({
         url: markerImage,

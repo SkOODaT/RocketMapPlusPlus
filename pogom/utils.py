@@ -441,6 +441,8 @@ def get_args():
     parser.add_argument('-gen', '--generate-images',
                         help='Use ImageMagick to generate gym images on demand.',
                         action='store_true', default=False)
+    parser.add_argument('-pa', '--pogo-assets', default=None,
+                        help='Directory or URL pointing to optional PogoAssets root directory.')				
     parser.set_defaults(DEBUG=False)
 
     args = parser.parse_args()
@@ -458,6 +460,9 @@ def get_args():
 
     args.locales_dir = 'static/dist/locales'
     args.data_dir = 'static/dist/data'
+
+    if args.pogo_assets and os.path.isdir(args.pogo_assets):
+        log.info("Using Assets URL at {}".format(args.pogo_assets))
 
     return args
 

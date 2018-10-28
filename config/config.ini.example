@@ -9,6 +9,7 @@
 ###################
 
 #generate-images                # Turn on automatic on-demand icon generation useing ImageMagick.
+#pogo-assets: 					# Provide Local or Remote Image URL Ie: Static
 
 # Required settings
 ###################

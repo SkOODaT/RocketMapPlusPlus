@@ -15,7 +15,7 @@ from flask import Flask, abort, jsonify, render_template, request,\
 from flask.json import JSONEncoder
 from flask_compress import Compress
 
-from pogom.dyn_img import get_gym_icon
+from pogom.dyn_img import get_gym_icon, get_pokemon_icon
 from .models import (Pokemon, Gym, GymDetails, Pokestop, Raid, ScannedLocation,
                      MainWorker, WorkerStatus, Token, HashKeys,
                      SpawnPoint, DeviceWorker, SpawnpointDetectionData, ScanSpawnPoint, PokestopMember)
@@ -104,6 +104,13 @@ class Pogom(Flask):
             self.render_service_worker_js)
         self.route("/feedpokemon", methods=['GET'])(self.feedpokemon)
         self.route("/gym_img", methods=['GET'])(self.gym_img)
+        self.route("/pkm_img", methods=['GET'])(self.pokemon_img)
+
+		
+    def pokemon_img(self):
+        pkm = int(request.args.get('pkm'))
+        weather = int(request.args.get('weather')) if 'weather' in request.args else 0
+        return send_file(get_pokemon_icon(pkm, weather), mimetype='image/png')
 
     	
     def gym_img(self):
