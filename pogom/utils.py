@@ -25,6 +25,8 @@ from pprint import pformat
 from time import strftime
 from timeit import default_timer
 
+from pogom import dyn_img
+
 log = logging.getLogger(__name__)
 
 
@@ -442,7 +444,7 @@ def get_args():
                         help='Use ImageMagick to generate gym images on demand.',
                         action='store_true', default=False)
     parser.add_argument('-pa', '--pogo-assets', default=None,
-                        help='Directory or URL pointing to optional PogoAssets root directory.')				
+                        help='Directory pointing to optional PogoAssets root directory.')				
     parser.set_defaults(DEBUG=False)
 
     args = parser.parse_args()
@@ -461,12 +463,53 @@ def get_args():
     args.locales_dir = 'static/dist/locales'
     args.data_dir = 'static/dist/data'
 
-    if args.pogo_assets and os.path.isdir(args.pogo_assets):
-        log.info("Using Assets URL at {}".format(args.pogo_assets))
-
     return args
 
+	
+def init_dynamic_images(args):
+    if args.generate_images:
+        executable = determine_imagemagick_binary()
+        if executable:
+            dyn_img.generate_images = True
+            dyn_img.imagemagick_executable = executable
+            log.info("Generating icons using ImageMagick executable '{}'.".format(executable))
+            if args.pogo_assets:
+                decr_assets_dir = os.path.join(args.pogo_assets, 'icons')
+                if os.path.isdir(decr_assets_dir):
+                    log.info("Using PogoAssets repository at '{}'".format(args.pogo_assets))
+                    dyn_img.pogo_assets = args.pogo_assets
+                else:
+                    log.error("Could not find PogoAssets repository at '{}'."
+                              " Clone via 'git clone -depth 1 https://github.com/ZeChrales/PogoAssets.git'".format(args.pogo_assets))
+        else:
+            log.error("Could not find ImageMagick executable. Make sure you can execute either 'magick' (ImageMagick 7)"
+                      " or 'convert' (ImageMagick 6) from the commandline. Otherwise you cannot use --generate-images")
+            sys.exit(1)
+			
 
+def is_imagemagick_binary(binary):
+    try:
+        process = subprocess.Popen([binary, '-version'], stdout=subprocess.PIPE)
+        out, err = process.communicate()
+        return "ImageMagick" in out
+    except:
+        return False
+		
+
+def determine_imagemagick_binary():
+    candidates = {
+        'magick': 'magick convert',
+        'convert': None
+    }
+    for c in candidates:
+        if is_imagemagick_binary(c):
+            return candidates[c] if candidates[c] else c
+    return None
+
+def init_args(args):
+    init_dynamic_images(args)
+
+	
 def now():
     # The fact that you need this helper...
     return int(time.time())
@@ -932,7 +975,6 @@ def _censor_args_namespace(args, censored_tag, empty_tag):
                     args[field] = empty_tag
 
     return args
-
 
 # Get censored debug info about the environment we're running in.
 def get_censored_debug_info():

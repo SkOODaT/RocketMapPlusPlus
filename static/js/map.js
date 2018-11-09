@@ -1460,24 +1460,24 @@ function updateGymMarker(item, marker) {
 		if (generateImages) {
 			markerImage = 'gym_img?team=' + gymTypes[item.team_id] + '&level=' + getGymLevel(item) + '&raidlevel=' + item['raid']['level']
 			scaleNumber = 48
-			if (gymInBattle) {
-                markerImage += '&in_battle=1'
-				scaleNumber = 75
-			}
 			if (gymExRaidEligible) {
                 markerImage += '&ex_raid=1'
 				scaleNumber = 55
 			}
+			if (gymInBattle) {
+                markerImage += '&in_battle=1'
+				scaleNumber = 75
+			}
 		} else {
             markerImage = 'static/images/gym/' + gymTypes[item.team_id] + '_' + getGymLevel(item) + '_' + item['raid']['level'] + '.png'
 			scaleNumber = 48
-            if (gymInBattle) {
-                markerImage = markerImage.replace('.png', '_isInBattle.png')
-				scaleNumber = 75
-            }
             if (gymExRaidEligible) {
                 markerImage = markerImage.replace('.png', '_ExRaidEligible.png')
 				scaleNumber = 55
+            }
+            if (gymInBattle) {
+                markerImage = markerImage.replace('.png', '_isInBattle.png')
+				scaleNumber = 75
             }
 		}
         marker.setIcon({
@@ -1490,24 +1490,24 @@ function updateGymMarker(item, marker) {
 		if (generateImages) {
 			markerImage = 'gym_img?team=' + gymTypes[item.team_id] + '&level=' + getGymLevel(item)
 			scaleNumber = 48
-			if (gymInBattle) {
-                markerImage += '&in_battle=1'
-				scaleNumber = 75
-			}
 			if (gymExRaidEligible) {
                 markerImage += '&ex_raid=1'
 				scaleNumber = 55
 			}
+			if (gymInBattle) {
+                markerImage += '&in_battle=1'
+				scaleNumber = 75
+			}
 		} else {
             markerImage = 'static/images/gym/' + gymTypes[item.team_id] + '_' + getGymLevel(item) + '.png'
 			scaleNumber = 48
-            if (gymInBattle) {
-                markerImage = markerImage.replace('.png', '_isInBattle.png')
-				scaleNumber = 75
-            }
             if (gymExRaidEligible) {
                 markerImage = markerImage.replace('.png', '_ExRaidEligible.png')
 				scaleNumber = 55
+            }
+            if (gymInBattle) {
+                markerImage = markerImage.replace('.png', '_isInBattle.png')
+				scaleNumber = 75
             }
 		}
         marker.setIcon({

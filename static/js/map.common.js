@@ -1039,11 +1039,11 @@ var StoreOptions = {
         type: StoreTypes.String
     },
     'zoomLevel': {
-        default: 16,
+        default: 14,
         type: StoreTypes.Number
     },
     'maxClusterZoomLevel': {
-        default: 14,
+        default: 12,
         type: StoreTypes.Number
     },
     'clusterZoomOnClick': {
@@ -1152,8 +1152,12 @@ function getPokemonIcon(item) {
     //var scaledIconSize = new google.maps.Size(scale * sprite.iconWidth, scale * sprite.iconHeight)
     //var scaledIconOffset = new google.maps.Point(0, 0)
     //var scaledIconCenterOffset = new google.maps.Point(scale * sprite.iconWidth / 2, scale * sprite.iconHeight / 2)
+
+    let gender_param = item['gender'] ? `&gender=${item['gender']}` : ''
+    let form_param = item['form'] ? `&form=${item['form']}` : ''
+    let costume_param = item['costume'] ? `&costume=${item['costume']}` : ''
     let weather_param = item['weather_boosted_condition'] ? `&weather=${item['weather_boosted_condition']}` : ''
-    let icon_url = `pkm_img?pkm=${item['pokemon_id']}${weather_param}`
+    let icon_url = `pkm_img?pkm=${item['pokemon_id']}${gender_param}${form_param}${costume_param}${weather_param}`
     
 	console.log(icon_url)
 	return icon_url
@@ -1233,7 +1237,9 @@ function setupPokemonMarker(item, map, isBounceDisabled, scaleByRarity = true, i
 
 	let markerImage = ''
     var iconname = item['pokemon_id']
-    if (item['form'] > 0) {
+    if (generateImages) {
+		markerImage = getPokemonIcon(item)
+	} else if (item['form'] > 0) {
         if (item['form'] < 37) {
             iconname += `_` + item['form']
         } else {
@@ -1243,7 +1249,7 @@ function setupPokemonMarker(item, map, isBounceDisabled, scaleByRarity = true, i
         }
 		markerImage = 'static/icons/' + iconname + '.png'
 	} else if (item['costume'] > 0) {
-        if (item['costume'] < 37) {
+        if (item['costume'] < 10) {
             iconname += `_` + item['costume']
 		}
 		markerImage = 'static/icons/' + iconname + '.png'
@@ -1254,9 +1260,7 @@ function setupPokemonMarker(item, map, isBounceDisabled, scaleByRarity = true, i
             iconname += '_F'
         }
 		markerImage = 'static/icons/' + iconname + '.png'
-    } else if (generateImages) {
-		markerImage = getPokemonIcon(item)
-	} else {
+    } else {
 		markerImage = 'static/icons/' + iconname + '.png'
 	}
     
@@ -1264,8 +1268,6 @@ function setupPokemonMarker(item, map, isBounceDisabled, scaleByRarity = true, i
         url: markerImage,
         scaledSize: new google.maps.Size(38, 38)
     })
-
-
 
     return marker
 }
@@ -1280,7 +1282,9 @@ function updatePokemonMarker(item, map, scaleByRarity = true, isNotifyPkmn = fal
 
 	let markerImage = ''
     var iconname = item['pokemon_id']
-    if (item['form'] > 0) {
+    if (generateImages) {
+		markerImage = getPokemonIcon(item)
+	} else if (item['form'] > 0) {
         if (item['form'] < 37) {
             iconname += `_` + item['form']
         } else {
@@ -1290,7 +1294,7 @@ function updatePokemonMarker(item, map, scaleByRarity = true, isNotifyPkmn = fal
         }
 		markerImage = 'static/icons/' + iconname + '.png'
 	} else if (item['costume'] > 0) {
-        if (item['costume'] < 37) {
+        if (item['costume'] < 10) {
             iconname += `_` + item['costume']
 		}
 		markerImage = 'static/icons/' + iconname + '.png'
@@ -1301,8 +1305,6 @@ function updatePokemonMarker(item, map, scaleByRarity = true, isNotifyPkmn = fal
             iconname += '_F'
         }
 		markerImage = 'static/icons/' + iconname + '.png'
-    } else if (generateImages) {
-		markerImage = getPokemonIcon(item)
 	} else {
 		markerImage = 'static/icons/' + iconname + '.png'
 	}

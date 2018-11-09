@@ -18,6 +18,8 @@ _build
 _build_html
 beehive.*
 static/images/generated/*.png
+static/images/generated/gym/*.png
+static/images/generated/pokemon/*.png
 static/images/raid/*.png
 !static/images/raid/*_unknown.png
 static/icons-sprite.png

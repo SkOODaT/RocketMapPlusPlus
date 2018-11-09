@@ -17,7 +17,7 @@ from flask_cors import CORS
 from flask_cache_bust import init_cache_busting
 
 from pogom.app import Pogom
-from pogom.utils import (get_args, now, log_resource_usage_loop, get_debug_dump_link,
+from pogom.utils import (get_args, now, log_resource_usage_loop, init_args, get_debug_dump_link,
                          dynamic_rarity_refresher)
 from pogom.altitude import get_gmaps_altitude
 
@@ -228,6 +228,8 @@ def main():
                  hastebin_id)
         sys.exit(1)
 
+    init_args(args)
+	
     # Let's not forget to run Grunt / Only needed when running with webserver.
     if not validate_assets(args):
         sys.exit(1)

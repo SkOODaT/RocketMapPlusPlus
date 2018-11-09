@@ -1,28 +1,58 @@
+import logging
 import os
 import subprocess
-
-import logging
 from string import join
 
-from pgoapi.protos.pogoprotos.map.weather.gameplay_weather_pb2 import *
+from pgoapi.protos.pogoprotos.enums.costume_pb2 import Costume
+from pgoapi.protos.pogoprotos.enums.form_pb2 import Form
+from pgoapi.protos.pogoprotos.enums.gender_pb2 import MALE, FEMALE, Gender, GENDERLESS, GENDER_UNSET
+from pgoapi.protos.pogoprotos.enums.weather_condition_pb2 import *
 
-from pogom.utils import get_args
+from pgoapi.protos.pogoprotos.map.weather.gameplay_weather_pb2 import *
+from pgoapi.protos.pogoprotos.map.weather.weather_alert_pb2 import *
+from pgoapi.protos.pogoprotos.networking.responses.get_map_objects_response_pb2 import *
 
 log = logging.getLogger(__name__)
 
-path_icons = os.path.join('static', 'icons')
-path_images = os.path.join('static', 'images')
+# Will be set during config parsing
+generate_images = False
+imagemagick_executable = None
+pogo_assets = None
+
+path_static = os.path.join(os.path.dirname(__file__), '..', 'static')
+path_icons = os.path.join(path_static, 'icons')
+path_images = os.path.join(path_static, 'images')
 path_gym = os.path.join(path_images, 'ggym')
 path_raid = os.path.join(path_images, 'graid')
 path_weather = os.path.join(path_images, 'weather')
+path_sex = os.path.join(path_images, 'sex')
 path_generated = os.path.join(path_images, 'generated')
+path_generated_gym = os.path.join(path_generated, 'gym')
 
 egg_images = {
-    1: 'egg_normal.png',
-    2: 'egg_normal.png',
-    3: 'egg_rare.png',
-    4: 'egg_rare.png',
-    5: 'egg_legendary.png'
+    1:              os.path.join(path_raid, 'egg_normal.png'),
+    2:              os.path.join(path_raid, 'egg_normal.png'),
+    3:              os.path.join(path_raid, 'egg_rare.png'),
+    4:              os.path.join(path_raid, 'egg_rare.png'),
+    5:              os.path.join(path_raid, 'egg_legendary.png')
+}
+
+egg_images_assets = {
+    1:              os.path.join(path_raid, 'egg_normal.png'),
+    2:              os.path.join(path_raid, 'egg_normal.png'),
+    3:              os.path.join(path_raid, 'egg_rare.png'),
+    4:              os.path.join(path_raid, 'egg_rare.png'),
+    5:              os.path.join(path_raid, 'egg_legendary.png'),
+}
+
+weather_images = {
+    CLEAR:          os.path.join(path_weather, 'weather_sunny.png'),
+    RAINY:          os.path.join(path_weather, 'weather_rain.png'),
+    PARTLY_CLOUDY:  os.path.join(path_weather, 'weather_partlycloudy_day.png'),
+    OVERCAST:       os.path.join(path_weather, 'weather_cloudy.png'),
+    WINDY:          os.path.join(path_weather, 'weather_windy.png'),
+    SNOW:           os.path.join(path_weather, 'weather_snow.png'),
+    FOG:            os.path.join(path_weather, 'weather_fog.png')
 }
 
 pkm_sizes = {
@@ -41,144 +71,278 @@ egg_sizes = {
     5: '65'
 }
 
-weather_images = {
-    1: os.path.join(path_weather, 'weather_sunny.png'),
-    2: os.path.join(path_weather, 'weather_rain.png'),
-    3: os.path.join(path_weather, 'weather_partlycloudy_day.png'),
-    4: os.path.join(path_weather, 'weather_cloudy.png'),
-    5: os.path.join(path_weather, 'weather_windy.png'),
-    6: os.path.join(path_weather, 'weather_snow.png'),
-    7: os.path.join(path_weather, 'weather_fog.png')
+gender_images = {
+    1:             os.path.join(path_sex, 'male.png'),
+    2:             os.path.join(path_sex, 'female.png'),
+    3:             os.path.join(path_sex, 'netural.png')
 }
 
+# Info about Pokemon spritesheet
+path_pokemon_spritesheet = os.path.join(path_static, 'icons-shuffle-sprite128x.png')
+pkm_sprites_size = 128
+pkm_sprites_cols = 16
+
+# Gym icons
+gym_icon_size = 96
+gym_badge_radius = 15
+gym_badge_padding = 1
+
+badge_upper_left = (gym_badge_padding + gym_badge_radius, gym_badge_padding + gym_badge_radius)
+badge_upper_right = (gym_icon_size - (gym_badge_padding + gym_badge_radius), gym_badge_padding + gym_badge_radius)
+badge_lower_left = (gym_badge_padding + gym_badge_radius, gym_icon_size - (gym_badge_padding + gym_badge_radius))
+badge_lower_right = (gym_icon_size - (gym_badge_padding + gym_badge_radius), gym_icon_size - (gym_badge_padding + gym_badge_radius))
+
+font = os.path.join(path_static, 'SF Intellivised.ttf')
+font_pointsize = 25
+
+
+def get_pokemon_raw_icon(pkm, gender=None, form=None, costume=None, weather=None):
+    if generate_images and pogo_assets:
+        source, target = pokemon_asset_path_shuffle(pkm, classifier='icon', gender=gender, form=form, costume=costume, weather=weather)
+        im_lines = ['-fuzz 0.5% -trim +repage'
+                    ' -scale "96x96>" -unsharp 0x1'
+                    ' -background none -gravity center -extent 96x96'
+                    ]
+        return run_imagemagick(source, im_lines, target)
+    else:
+        return os.path.join(path_icons, '{}.png'.format(pkm))
+
+
+def get_pokemon_map_icon(pkm, weather=None, gender=None, form=None, costume=None):
+    im_lines = []
+
+    # Add Pokemon icon
+    if pogo_assets:
+        source, target = pokemon_asset_path_shuffle(pkm, gender=gender, form=form, costume=costume,
+                                            weather=weather)
+        target_size = 96
+        im_lines.append(
+            ' -fuzz 0.5% -trim +repage'
+            ' -scale "133x133>" -unsharp 0x1'
+            ' -background none -gravity center -extent 139x139'
+            ' -background black -alpha background -channel A -blur 0x1 -level 0,10%'
+            ' -adaptive-resize {size}x{size}'
+            ' -modulate 100,110'.format(size=target_size)
+        )
+    else:
+        # Extract pokemon icon from spritesheet
+        source = path_pokemon_spritesheet
+        weather_suffix = '_{}'.format(WeatherCondition.Name(weather)) if weather else ''
+        target_path = os.path.join(path_generated, 'pokemon_spritesheet_marker')
+        target = os.path.join(target_path, 'pokemon_{}{}.png'.format(pkm, weather_suffix))
+
+        target_size = pkm_sprites_size
+        pkm_idx = pkm - 1
+        x = (pkm_idx % pkm_sprites_cols) * pkm_sprites_size
+        y = (pkm_idx / pkm_sprites_cols) * pkm_sprites_size
+        im_lines.append(' -crop {size}x{size}+{x}+{y} +repage'.format(size=target_size, x=x, y=y))
+
+    if gender:
+        radius = 12
+        x = target_size - radius - 2
+        y = radius + 40
+        y2 = 40
+        im_lines.append(
+            '-gravity east'
+            ' -fill "#FFFD" -stroke black -draw "circle {x},{y} {x},{y2}"'
+            ' -draw "image over 6,5 15,15 \'{gender_img}\'"'.format(x=x, y=y, y2=y2, gender_img=gender_images[gender])
+        )
+
+    if weather:
+        radius = 20
+        x = target_size - radius - 2
+        y = radius + 1
+        y2 = 1
+        im_lines.append(
+            '-gravity northeast'
+            ' -fill "#FFFD" -stroke black -draw "circle {x},{y} {x},{y2}"'
+            ' -draw "image over 1,1 42,42 \'{weather_img}\'"'.format(x=x, y=y, y2=y2, weather_img=weather_images[weather])
+        )
+
+    return run_imagemagick(source, im_lines, target)
+
+
 def get_gym_icon(team, level, raidlevel, pkm, is_in_battle, is_ex_raid_eligible, is_unknown):
-    init_image_dir()
     level = int(level)
 
-    args = get_args()
-    if not args.generate_images:
+    if not generate_images:
         return default_gym_image(team, level, raidlevel, pkm)
 
-    subject_lines = []
-    badge_lines = []
+    im_lines = ['-font "{}" -pointsize {}'.format(font, font_pointsize)]
     if pkm and pkm != 'null':
         # Gym with ongoing raid
-        raidlevel = int(raidlevel)
-        out_filename = os.path.join(path_generated, "{}_L{}_R{}_P{}.png".format(team, level, raidlevel, pkm))
-        subject_lines = draw_gym_subject(os.path.join(path_icons, '{}.png'.format(pkm)), pkm_sizes[raidlevel])
-        badge_lines.extend(draw_badge(75, 20, 15, "white", "black", raidlevel))
+        out_filename = os.path.join(path_generated_gym, "{}_L{}_R{}_P{}.png".format(team, level, raidlevel, pkm))
+        im_lines.extend(draw_raid_pokemon(pkm, raidlevel))
+        im_lines.extend(draw_raid_level(raidlevel))
         if level > 0:
-            badge_lines.extend(draw_badge(75, 76, 15, "black", "white", level))
+            im_lines.extend(draw_gym_level(level))
     elif raidlevel:
         # Gym with upcoming raid (egg)
         raidlevel = int(raidlevel)
-        out_filename = os.path.join(path_generated, "{}_L{}_R{}.png".format(team, level, raidlevel))
-        subject_lines = draw_gym_subject(os.path.join(path_raid, egg_images[raidlevel]), egg_sizes[raidlevel])
-        badge_lines.extend(draw_badge(75, 20, 15, "white", "black", raidlevel))
+        out_filename = os.path.join(path_generated_gym, "{}_L{}_R{}.png".format(team, level, raidlevel))
+        im_lines.extend(draw_raid_egg(raidlevel))
+        im_lines.extend(draw_raid_level(raidlevel))
         if level > 0:
-            badge_lines.extend(draw_badge(75, 76, 15, "black", "white", level))
+            im_lines.extend(draw_gym_level(level))
     elif level > 0:
         # Occupied gym
-        out_filename = os.path.join(path_generated, '{}_L{}.png'.format(team, level))
-        badge_lines.extend(draw_badge(75, 76, 15, "black", "white", level))
+        out_filename = os.path.join(path_generated_gym, '{}_L{}.png'.format(team, level))
+        im_lines.extend(draw_gym_level(level))
     else:
         # Neutral gym
-        return os.path.join(path_gym, '{}.png'.format(team))
+        out_filename = os.path.join(path_generated_gym, '{}_L{}.png'.format(team, level))
+        return out_filename
+        #return os.path.join(path_gym, '{}.png'.format(team))
 
-    # Battle Badge
+    # Battle Indicator
     if is_in_battle:
-        subject_lines.append('-gravity center ( {} -resize 90x90 ( +clone -background black -shadow 80x3+5+5 ) +swap -background none -layers merge +repage ) -geometry +0+0 -composite'.format(
-            os.path.join(path_gym, 'Battle.png')))
-        out_filename = out_filename.replace('.png', '_B.png')
-
+        out_filename = out_filename.replace('.png', '_Battle.png')
+        im_lines.extend(draw_battle_indicator())
+		
     # Ex Raid Badge
     if is_ex_raid_eligible:
-        subject_lines.append('-gravity center ( {} -resize 50x50 ( +clone -background black -shadow 80x3+5+5 ) +swap -background none -layers merge +repage ) -geometry +0+0 -composite'.format(
-            os.path.join(path_gym, 'ExRaid.png')))
         out_filename = out_filename.replace('.png', '_Ex.png')
+        im_lines.extend(draw_ex_raid_indicator())
 
+    # Unknown Badge
     if is_unknown:
-        subject_lines.append('-gravity center ( {} -resize 75x75 ) -geometry +0+0 -composite'.format(
-            os.path.join(path_gym, 'Unknown.png')))
         out_filename = out_filename.replace('.png', '_Unknown.png')
-		
-    if not os.path.isfile(out_filename):
-        gym_image = os.path.join('static', 'images', 'gym', '{}.png'.format(team))
-        font = os.path.join('static', 'SF Intellivised.ttf')
-        cmd = 'convert {} {} -gravity center -font "{}" -pointsize 25 {} {}'.format(gym_image, join(subject_lines),
-                                                                                    font, join(badge_lines),
-                                                                                    out_filename)
-        if os.name != 'nt':
-            cmd = cmd.replace(" ( ", " \( ").replace(" ) ", " \) ")
-        subprocess.call(cmd, shell=True)
-    return out_filename
+        im_lines.extend(draw_unknown_indicator())
+
+    gym_image = os.path.join(path_gym, '{}.png'.format(team))
+    return run_imagemagick(gym_image, im_lines, out_filename)
 
 
-def get_pokemon_icon(pkm, weather):
-    init_image_dir()
-    args = get_args()
-    im_lines = []
-    # Add Pokemon icon
-    if args.pogo_assets:
-        im_lines.append(
-            ' -fuzz 0.5% -trim +repage'
-            ' -scale 133x133 -unsharp 0x1'
-            ' -background none -gravity center -extent 139x139'
-            ' -background black -alpha background -channel A -blur 0x1 -level 0,10%'
-            ' -adaptive-resize 96x96'
-            ' -modulate 100,110'
-        )
+def draw_raid_pokemon(pkm, raidlevel):
+    raidlevel = int(raidlevel)
+    if pogo_assets:
+        pkm_path, dummy = pokemon_asset_path_shuffle(int(pkm))
+        trim = True
     else:
-        im_lines.append(
-            ' -bordercolor none -border 2'
-            ' -background black -alpha background -channel A -blur 0x1 -level 0,10%'
-            ' -adaptive-resize 96x96'
-            ' -modulate 100,110'
-        )
-    if weather:
-        weather_name = GameplayWeather.WeatherCondition.Name(int(weather))
-        out_filename = os.path.join(path_generated, "pokemon_{}_{}.png".format(pkm, weather_name))
-        im_lines.append(
-            ' -gravity northeast'
-            ' -fill "#FFFD" -stroke black -draw "circle 74,21 74,1"'
-            ' -draw "image over 1,1 42,42 \'{}\'"'.format(weather_images[weather])
-        )
+        pkm_path = os.path.join(path_icons, '{}.png'.format(pkm))
+        trim = False
+    return draw_gym_subject(pkm_path, pkm_sizes[raidlevel], trim=trim)
+
+
+def draw_raid_egg(raidlevel):
+    if pogo_assets:
+        egg_path = os.path.join(pogo_assets, egg_images_assets[raidlevel])
     else:
-        out_filename = os.path.join(path_generated, "pokemon_{}.png".format(pkm))
-    if not os.path.isfile(out_filename):
-        if args.pogo_assets:
-            pokemon_image = '{}/icons/{}.png'.format(args.pogo_assets, pkm)
-        else:
-            pokemon_image = os.path.join(path_icons, '{}.png'.format(pkm))
-        cmd = 'convert {} {} {}'.format(pokemon_image, join(im_lines), out_filename)
-        if os.name != 'nt':
-            cmd = cmd.replace(" ( ", " \( ").replace(" ) ", " \) ")
-        subprocess.call(cmd, shell=True)
-    return out_filename
+        egg_path = egg_images[raidlevel]
+    #raidlevel = int(raidlevel)
+    return draw_gym_subject(egg_path, egg_sizes[raidlevel], gravity='center')
 
 
-def draw_gym_subject(image, size, gravity='north'):
-    lines = []
-    lines.append(
-        '-gravity {} ( {} -resize {}x{} ( +clone -background black -shadow 80x3+5+5 ) +swap -background none -layers merge +repage ) -geometry +0+0 -composite'.format(
-            gravity, image, size, size))
+def draw_gym_level(level):
+    return draw_badge(badge_lower_right, "black", "white", level)
+
+
+def draw_raid_level(raidlevel):
+    return draw_badge(badge_upper_right, "white", "black", raidlevel)
+
+
+def draw_battle_indicator():
+    return battle_indicator()
+
+
+def draw_ex_raid_indicator():
+    return ex_raid_indicator()
+
+
+def draw_unknown_indicator():
+    return unknown_indicator()
+
+
+def battle_indicator():
+    # battle icon
+    return ['-gravity center ( "{}" -resize 90x90 ( +clone -background black -shadow 80x3+5+5 ) +swap -background none -layers merge +repage ) -geometry +0+0 -composite'.format(
+        os.path.join(path_gym, 'Battle.png'))]
+
+
+def ex_raid_indicator():
+    # battle icon
+    return ['-gravity center ( "{}" -resize 50x50 ( +clone -background black -shadow 80x3+5+5 ) +swap -background none -layers merge +repage ) -geometry +0+0 -composite'.format(
+        os.path.join(path_gym, 'ExRaid.png'))]
+
+
+def unknown_indicator():
+    # battle icon
+    return ['-gravity center ( "{}" -resize 75x75 ( +clone -background black -shadow 80x3+5+5 ) +swap -background none -layers merge +repage ) -geometry +0+0 -composite'.format(
+        os.path.join(path_gym, 'Unknown.png'))]
+
+
+def pokemon_asset_path_shuffle(pkm, classifier=None, gender=GENDER_UNSET, form=None, costume=None, weather=None):
+    gender_suffix = gender_assets_suffix = ''
+    form_suffix = form_assets_suffix  = ''
+    costume_suffix = costume_assets_suffix = ''
+    weather_suffix = '_{}'.format(WeatherCondition.Name(weather)) if weather else ''
+
+    # Genderless For Ditto, Should Be Proper Anyway...
+    if gender in (GENDERLESS, MALE, FEMALE):
+        gender_assets_suffix = ''
+        gender_suffix = '_{}'.format(Gender.Name(gender))
+    elif gender in (GENDER_UNSET, GENDERLESS):
+        gender_assets_suffix = '' if pkm > 0 else ''
+
+    if form:
+        if gender:
+            gender_suffix = gender_assets_suffix = ''
+            gender_suffix = '_{}'.format(Gender.Name(gender))
+        form_assets_suffix = '_{}'.format(form)
+        form_suffix = '_{}'.format(Form.Name(form))
+
+    if costume:
+        costume_assets_suffix = '_{}'.format(costume)
+        costume_suffix = '_{}'.format(Costume.Name(costume))
+
+    if not gender_assets_suffix and not form_assets_suffix and not costume_assets_suffix:
+        gender_assets_suffix = '_16' if pkm == 201 else '' if pkm > 0 else ''
+
+    assets_basedir = os.path.join(pogo_assets, 'icons')
+    assets_fullname = os.path.join(assets_basedir,
+                                   '{}{}{}{}.png'.format(pkm, gender_assets_suffix, form_assets_suffix,
+                                                                    costume_assets_suffix))
+    target_path = os.path.join(path_generated, 'pokemon_{}'.format(classifier)) if classifier else os.path.join(
+        path_generated, 'pokemon')
+    target_name = os.path.join(target_path,
+                               "pkm_{:03d}{}{}{}{}.png".format(pkm, gender_suffix, form_suffix, costume_suffix,
+                                                               weather_suffix))
+    if os.path.isfile(assets_fullname):
+        return assets_fullname, target_name
+    else:
+        if gender == MALE:
+            log.warning("Cannot find PogoAssets file {}".format(assets_fullname))
+            # Dummy Pokemon icon
+            return os.path.join(assets_basedir, 'pokemon_icon_000.png'), os.path.join(target_path, 'pkm_000.png')
+        return pokemon_asset_path_shuffle(pkm, classifier=classifier, gender=MALE, form=form, costume=costume, weather=weather)
+
+
+def draw_gym_subject(image, size, gravity='north', trim=False):
+    trim_cmd = ' -fuzz 0.5% -trim +repage' if trim else ''
+    lines = [
+        '-gravity {} ( "{}"{} -scale {}x{} -unsharp 0x1 ( +clone -background black -shadow 80x3+5+5 ) +swap -background none -layers merge +repage ) -geometry +0+0 -composite'.format(
+            gravity, image, trim_cmd, size, size)
+    ]
     return lines
 
 
-def draw_badge(x, y, r, fill_col, text_col, text):
-    lines = []
-    lines.append('-fill {} -stroke black -draw "circle {},{} {},{}"'.format(fill_col, x, y, x + r, y))
-    lines.append('-fill {} -draw "text {},{} \'{}\'"'.format(text_col, x - 47, y - 44, text))
+def draw_badge(pos, fill_col, text_col, text):
+    (x, y) = pos
+    lines = [
+        '-fill {} -stroke black -draw "circle {},{} {},{}"'.format(fill_col, x, y, x + gym_badge_radius, y),
+        '-gravity center -fill {} -stroke none -draw "text {},{} \'{}\'"'.format(text_col, x - 47, y - 44, text)
+    ]
     return lines
 
 
-def init_image_dir():
-    if not os.path.isdir(path_generated):
+def init_image_dir(path):
+    if not os.path.isdir(path):
         try:
-            os.makedirs(path_generated)
-        except OSError as exc:
-            if not os.path.isdir(path_generated):
+            os.makedirs(path)
+        except OSError:
+            if not os.path.isdir(path):
                 raise
+
 
 def default_gym_image(team, level, raidlevel, pkm):
     path = path_gym
@@ -193,3 +357,16 @@ def default_gym_image(team, level, raidlevel, pkm):
         icon = "{}.png".format(team)
 
     return os.path.join(path, icon)
+
+
+def run_imagemagick(source, im_lines, out_filename):
+    if not os.path.isfile(out_filename):
+        # Make sure, target path exists
+        init_image_dir(os.path.split(out_filename)[0])
+
+        cmd = '{} "{}" {} "{}"'.format(imagemagick_executable, source, join(im_lines), out_filename)
+        if os.name != 'nt':
+            cmd = cmd.replace(" ( ", " \( ").replace(" ) ", " \) ")
+        log.info("Generating icon '{}'".format(out_filename))
+        subprocess.call(cmd, shell=True)
+    return out_filename
