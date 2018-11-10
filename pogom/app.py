@@ -430,6 +430,9 @@ class Pogom(Flask):
 
             if deviceworker['scanning'] == 0:
                 deviceworker['scanning'] = 1
+            if deviceworker['fetch'] == 'IDLE':
+                deviceworker['latitude'] = lat
+                deviceworker['longitude'] = lng
 
             deviceworkers = {}
             deviceworkers[uuid] = deviceworker
