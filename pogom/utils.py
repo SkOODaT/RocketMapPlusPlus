@@ -14,6 +14,7 @@ import psutil
 import subprocess
 import requests
 import configargparse
+from datetime import datetime
 
 from s2sphere import CellId, LatLng
 from geopy.geocoders import GoogleV3
@@ -26,6 +27,7 @@ from time import strftime
 from timeit import default_timer
 
 from pogom import dyn_img
+from protos.pogoprotos.enums.pokemon_id_pb2 import _POKEMONID
 
 log = logging.getLogger(__name__)
 
@@ -235,8 +237,11 @@ def get_args():
                         help=('Size of the steps'),
                         type=float, default=0.00007)
     parser.add_argument('-mr', '--maxradius',
-                        help=('Maxim radius (factor times the stepsize), use 0 to disable'),
+                        help=('Maximum radius (in km), use 0 to disable'),
                         type=int, default=0)
+    parser.add_argument('-st', '--scheduletimeout',
+                        help=('Timeout in minutes before resetting scheduled route for fetch'),
+                        type=int, default=10)
     parser.add_argument('-dmm', '--dont-move-map',
                         help=("Don't update the map location on new scan location"),
                         action='store_true', default=False)
@@ -310,7 +315,8 @@ def get_args():
         help=('Defines the type of messages to send to webhooks.'),
         choices=[
             'pokemon', 'gym', 'raid', 'egg', 'tth', 'gym-info',
-            'pokestop', 'lure', 'captcha'
+            'pokestop', 'lure', 'captcha', 'quest', 'pokemon-iv',
+            'devices'
         ],
         action='append',
         default=[])
@@ -394,6 +400,15 @@ def get_args():
                               'gyms that are candidates for EX raids. ' +
                               'Only required once per area.'),
                         action='store_true', default=False)
+    parser.add_argument('-gf', '--geofence-file',
+                        help=('Geofence file to define outer borders of the ' +
+                              'scan area.'),
+                        default='')
+    parser.add_argument('-gef', '--geofence-excluded-file',
+                        help=('File to define excluded areas inside scan ' +
+                              'area. Regarded this as inverted geofence. ' +
+                              'Can be combined with geofence-file.'),
+                        default='')
     verbose = parser.add_mutually_exclusive_group()
     verbose.add_argument('-v',
                          help=('Show debug messages from RocketMap ' +
@@ -621,6 +636,17 @@ def get_pokemon_data(pokemon_id):
 
 def get_pokemon_name(pokemon_id):
     return i8ln(get_pokemon_data(pokemon_id)['name'])
+
+
+def get_quest_icon(reward_type, reward_item):
+    result = ""
+    if reward_type == "POKEMON_ENCOUNTER":
+        result = str(_POKEMONID.values_by_name[reward_item].number)
+    elif reward_type == "STARDUST":
+        result = "STARDUST"
+    else:
+        result = reward_item
+    return result
 
 
 def get_pokemon_types(pokemon_id):
@@ -1067,6 +1093,69 @@ def get_pokemon_rarity(total_spawns_all, total_spawns_pokemon):
         spawn_group = 'Uncommon'
 
     return spawn_group
+
+
+def device_worker_refresher(db_update_queue, wh_update_queue, args):
+    from pogom.models import DeviceWorker
+
+    refresh_time_sec = 60
+
+    workers = {}
+    deviceworkers = DeviceWorker.get_all()
+    for worker in deviceworkers:
+        workers[worker['deviceid']] = worker.copy()
+
+    while True:
+        log.info('Updating deviceworkers...')
+
+        deviceworkers = DeviceWorker.get_all()
+        updateworkers = {}
+
+        for worker in deviceworkers:
+            needtosend = False
+            if worker['deviceid'] not in workers:
+                needtosend = True
+                log.info("New device found: " + worker['deviceid'])
+            else:
+                last_updated = worker['last_updated']
+                difference = (datetime.utcnow() - last_updated).total_seconds()
+                if difference > 300 and worker['fetch'] != 'IDLE':
+                    worker['fetch'] = 'IDLE'
+                    updateworkers[worker['deviceid']] = worker
+                    needtosend = True
+                    log.info("Device stopped fetching: " + worker['deviceid'])
+                last_scanned = worker['last_scanned']
+                difference = (datetime.utcnow() - last_scanned).total_seconds()
+                if difference < 60 and worker['scanning'] == 0:
+                    worker['scanning'] = 1
+                    updateworkers[worker['deviceid']] = worker
+                    needtosend = True
+                    log.info("Device is scanning " + worker['deviceid'])
+                elif difference > 60 and worker['scanning'] == 1:
+                    worker['scanning'] = 0
+                    updateworkers[worker['deviceid']] = worker
+                    needtosend = True
+                    log.info("Device went idle " + worker['deviceid'])
+                if worker['fetch'] != workers[worker['deviceid']]['fetch']:
+                    needtosend = True
+                    log.info("Device changed fetching endpoint: " + worker['deviceid'])
+                if worker['scanning'] != workers[worker['deviceid']]['scanning']:
+                    needtosend = True
+                    log.info("Device changed scanning status: " + worker['deviceid'])
+            workers[worker['deviceid']] = worker.copy()
+
+            if needtosend and 'devices' in args.wh_types:
+                wh_worker = {
+                    'uuid': worker['deviceid'],
+                    'fetch': worker['fetch'],
+                    'scanning': worker['scanning']
+                }
+                wh_update_queue.put(('devices', wh_worker))
+
+        if updateworkers:
+            db_update_queue.put((DeviceWorker, updateworkers))
+
+        time.sleep(refresh_time_sec)
 
 
 def dynamic_rarity_refresher():

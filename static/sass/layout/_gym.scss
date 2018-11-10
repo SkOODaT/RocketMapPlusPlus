@@ -35,6 +35,10 @@
     }
   }
 
+  &.img {
+    display: none;
+  }
+
   &.sprite {
     display: block;
     height: 64px;

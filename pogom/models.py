@@ -22,12 +22,14 @@ from datetime import datetime, timedelta
 from cachetools import TTLCache
 from cachetools import cached
 from timeit import default_timer
-from flask import json
+import geopy
+from collections import OrderedDict
 
 from .utils import (get_pokemon_name, get_pokemon_types,
                     get_args, cellid, in_radius, date_secs, clock_between,
                     get_move_name, get_move_damage, get_move_energy,
-                    get_move_type, calc_pokemon_level, peewee_attr_to_col)
+                    get_move_type, calc_pokemon_level, peewee_attr_to_col,
+                    get_quest_icon)
 from .transform import transform_from_wgs_to_gcj, get_new_coords
 from .customLog import printPokemon
 
@@ -41,7 +43,7 @@ args = get_args()
 flaskDb = FlaskDB()
 cache = TTLCache(maxsize=100, ttl=60 * 5)
 
-db_schema_version = 43
+db_schema_version = 47
 
 
 class MyRetryDB(RetryOperationalError, PooledMySQLDatabase):
@@ -305,6 +307,12 @@ class Pokemon(LatLongModel):
                  .dicts()
                  )
 
+        if args.china:
+            for result in query:
+                result['latitude'], result['longitude'] = \
+                    transform_from_wgs_to_gcj(
+                        result['latitude'], result['longitude'])
+
         return list(query)
 
     @staticmethod
@@ -332,6 +340,123 @@ class Pokemon(LatLongModel):
         return list(itertools.chain(*query))
 
 
+# Geofence DB Model
+class Geofence(BaseModel):
+    name = Utf8mb4CharField(max_length=50)
+    excluded = BooleanField()
+    coordinates_id = SmallIntegerField()
+    latitude = DoubleField()
+    longitude = DoubleField()
+
+    class Meta:
+        primary_key = False
+
+    @staticmethod
+    def clear_all():
+        # Remove all geofences without interfering with other threads.
+        with flaskDb.database.transaction():
+            DeleteQuery(Geofence).execute()
+
+    @staticmethod
+    def remove_duplicates(geofences):
+        # Remove old geofences without interfering with other DB threads.
+        with flaskDb.database.transaction():
+            for g in geofences:
+                (DeleteQuery(Geofence)
+                 .where(Geofence.name == g['name'])
+                 .execute())
+
+    @staticmethod
+    def push_geofences(geofences):
+        Geofence.remove_duplicates(geofences)
+
+        db_geofences = []
+        for g in geofences:
+            coordinates_id = 0
+            for c in g['polygon']:
+                db_geofences.append({
+                    'excluded': g['excluded'],
+                    'name': g['name'],
+                    'coordinates_id': coordinates_id,
+                    'latitude': c['lat'],
+                    'longitude': c['lon']
+                })
+                coordinates_id = coordinates_id + 1
+
+        # Make a DB save.
+        with flaskDb.database.transaction():
+            Geofence.insert_many(db_geofences).execute()
+
+        return db_geofences
+
+    @staticmethod
+    def get_geofences():
+        query = Geofence.select().dicts()
+
+        # Performance:  disable the garbage collector prior to creating a
+        # (potentially) large dict with append().
+        gc.disable()
+
+        geofences = []
+        for g in query:
+            if args.china:
+                g['polygon']['latitude'], g['polygon']['longitude'] = \
+                    transform_from_wgs_to_gcj(g['polygon']['latitude'],
+                                              g['polygon']['longitude'])
+            geofences.append(g)
+
+        # Re-enable the GC.
+        gc.enable()
+
+        return geofences
+
+
+class Quest(BaseModel):
+    pokestop_id = Utf8mb4CharField(primary_key=True, max_length=50)
+    quest_type = Utf8mb4CharField(max_length=50)
+    goal = IntegerField(null=True)
+    reward_type = Utf8mb4CharField(max_length=50)
+    reward_item = Utf8mb4CharField(max_length=50, null=True)
+    reward_amount = IntegerField(null=True)
+    last_scanned = DateTimeField(default=datetime.utcnow, index=True)
+
+    @staticmethod
+    def get_quests(swLat, swLng, neLat, neLng, timestamp=0, oSwLat=None,
+                   oSwLng=None, oNeLat=None, oNeLng=None, lured=False):
+
+        query = (Quest
+                 .select(Quest.pokestop_id,
+                         Pokestop.latitude,
+                         Pokestop.longitude,
+                         Quest.quest_type,
+                         Quest.reward_type,
+                         Quest.reward_item,
+                         Quest.reward_amount,
+                         Quest.last_scanned)
+                 .join(Pokestop, JOIN.LEFT_OUTER,
+                       on=(Quest.pokestop_id == Pokestop.pokestop_id)))
+
+        if not (swLat and swLng and neLat and neLng):
+            query = (query
+                     .dicts())
+        else:
+            query = (query
+                     .where((Pokestop.latitude >= swLat) &
+                            (Pokestop.longitude >= swLng) &
+                            (Pokestop.latitude <= neLat) &
+                            (Pokestop.longitude <= neLng))
+                     .dicts())
+
+#        quests = {}
+#        for quest in query:
+#            if args.china:
+#                quest['latitude'], quest['longitude'] = \
+#                    transform_from_wgs_to_gcj(quest['latitude'], quest['longitude'])
+#            quests[quest['pokestop_id']] = quest
+
+        return list(query)
+
+
 class Pokestop(LatLongModel):
     pokestop_id = Utf8mb4CharField(primary_key=True, max_length=50)
     enabled = BooleanField()
@@ -353,7 +478,8 @@ class Pokestop(LatLongModel):
         query = Pokestop.select(Pokestop.active_fort_modifier,
                                 Pokestop.enabled, Pokestop.latitude,
                                 Pokestop.longitude, Pokestop.last_modified,
-                                Pokestop.lure_expiration, Pokestop.pokestop_id)
+                                Pokestop.lure_expiration, Pokestop.pokestop_id,
+                                Pokestop.last_updated)
 
         if not (swLat and swLng and neLat and neLng):
             query = (query
@@ -425,6 +551,7 @@ class Pokestop(LatLongModel):
                 p['latitude'], p['longitude'] = \
                     transform_from_wgs_to_gcj(p['latitude'], p['longitude'])
             p['pokemon'] = []
+            p['quest'] = {}
             pokestops[p['pokestop_id']] = p
             pokestop_ids.append(p['pokestop_id'])
 
@@ -451,16 +578,62 @@ class Pokestop(LatLongModel):
                 p['pokemon_name'] = get_pokemon_name(p['pokemon_id'])
                 pokestops[p['pokestop_id']]['pokemon'].append(p)
 
+            details = (PokestopDetails
+                       .select(
+                           PokestopDetails.pokestop_id,
+                           PokestopDetails.name,
+                           PokestopDetails.url)
+                       .where(PokestopDetails.pokestop_id << pokestop_ids)
+                       .dicts())
+
+            for d in details:
+                pokestops[d['pokestop_id']]['name'] = d['name']
+                pokestops[d['pokestop_id']]['url'] = d['url']
+
+            quests = (Quest
+                      .select(
+                          Quest.pokestop_id,
+                          Quest.quest_type,
+                          Quest.reward_type,
+                          Quest.reward_item)
+                      .where(Quest.pokestop_id << pokestop_ids)
+                      .dicts())
+            for q in quests:
+                pokestops[q['pokestop_id']]['quest']['text'] = q['quest_type']
+                pokestops[q['pokestop_id']]['quest']['type'] = q['reward_type']
+                pokestops[q['pokestop_id']]['quest']['item'] = q['reward_item']
+                pokestops[q['pokestop_id']]['quest']['icon'] = get_quest_icon(q['reward_type'], q['reward_item'])
+
         # Re-enable the GC.
         gc.enable()
 
         return pokestops
 
     @staticmethod
+    def get_pokestop_details(id):
+        try:
+            details = (PokestopDetails
+                       .select(
+                           PokestopDetails.pokestop_id,
+                           PokestopDetails.name,
+                           PokestopDetails.description,
+                           PokestopDetails.url)
+                       .where(PokestopDetails.pokestop_id == id)
+                       .dicts()
+                       .get())
+        except PokestopDetails.DoesNotExist:
+            return None
+
+        return details
+
+    @staticmethod
     def get_stop(id):
         try:
             result = (Pokestop
                       .select(Pokestop.pokestop_id,
+                              PokestopDetails.name,
+                              PokestopDetails.url,
+                              PokestopDetails.description,
                               Pokestop.enabled,
                               Pokestop.latitude,
                               Pokestop.longitude,
@@ -468,6 +641,8 @@ class Pokestop(LatLongModel):
                               Pokestop.lure_expiration,
                               Pokestop.active_fort_modifier,
                               Pokestop.last_updated)
+                      .join(PokestopDetails, JOIN.LEFT_OUTER,
+                            on=(Pokestop.pokestop_id == PokestopDetails.pokestop_id))
                       .where(Pokestop.pokestop_id == id)
                       .dicts()
                       .get())
@@ -500,6 +675,91 @@ class Pokestop(LatLongModel):
             p['pokemon_name'] = get_pokemon_name(p['pokemon_id'])
 
             result['pokemon'].append(p)
+
+        result['quest'] = {}
+        quest = (Quest
+                 .select(
+                     Quest.quest_type,
+                     Quest.reward_type,
+                     Quest.reward_item)
+                 .where(Quest.pokestop_id == id)
+                 .dicts())
+        for q in quest:
+            result['quest']['text'] = q['quest_type']
+            result['quest']['type'] = q['reward_type']
+            result['quest']['item'] = q['reward_item']
+            result['quest']['icon'] = get_quest_icon(q['reward_type'], q['reward_item'])
+
+        return result
+
+    @staticmethod
+    def get_nearby_pokestops(lat, lng, dist):
+        pokestops = {}
+        with Pokestop.database().execution_context():
+            query = (Pokestop.select(
+                Pokestop.latitude, Pokestop.longitude, Pokestop.pokestop_id).dicts())
+
+            lat1 = lat - 0.1
+            lat2 = lat + 0.1
+            lng1 = lng - 0.1
+            lng2 = lng + 0.1
+            minlat = min(lat1, lat2)
+            maxlat = max(lat1, lat2)
+            minlng = min(lng1, lng2)
+            maxlng = max(lng1, lng2)
+
+            if dist > 0:
+                query = (query
+                         .where((((Pokestop.latitude >= minlat) &
+                                  (Pokestop.longitude >= minlng) &
+                                  (Pokestop.latitude <= maxlat) &
+                                  (Pokestop.longitude <= maxlng))))
+                         .dicts())
+
+            queryDict = query.dicts()
+
+            from .geofence import Geofences
+            geofences = Geofences()
+            if geofences.is_enabled():
+                results = []
+                for p in queryDict:
+                    results.append((round(p['latitude'], 5), round(p['longitude'], 5), 0))
+                results = geofences.get_geofenced_coordinates(results)
+                if not results:
+                    return []
+                for index, coords in enumerate(results):
+                    key = index
+                    latitude = coords[0]
+                    longitude = coords[1]
+                    distance = geopy.distance.vincenty((lat, lng), (latitude, longitude)).km
+                    if dist == 0 or distance <= dist:
+                        pokestops[key] = {
+                            'latitude': latitude,
+                            'longitude': longitude,
+                            'distance': distance
+                        }
+            else:
+                for p in queryDict:
+                    key = p['pokestop_id']
+                    latitude = round(p['latitude'], 5)
+                    longitude = round(p['longitude'], 5)
+                    distance = geopy.distance.vincenty((lat, lng), (latitude, longitude)).km
+                    if dist == 0 or distance <= dist:
+                        pokestops[key] = {
+                            'latitude': latitude,
+                            'longitude': longitude,
+                            'distance': distance
+                        }
+            orderedpokestops = OrderedDict(sorted(pokestops.items(), key=lambda x: x[1]['distance']))
+
+            result = []
+            while len(orderedpokestops) > 0:
+                value = orderedpokestops.items()[0][1]
+                result.append((value['latitude'], value['longitude']))
+                newlat = value['latitude']
+                newlong = value['longitude']
+                orderedpokestops.popitem(last=False)
+                orderedpokestops = OrderedDict(sorted(orderedpokestops.items(), key=lambda x: geopy.distance.vincenty((newlat, newlong), (x[1]['latitude'], x[1]['longitude'])).km))
 
         return result
 
@@ -571,6 +831,9 @@ class Gym(LatLongModel):
         gyms = {}
         gym_ids = []
         for g in results:
+            if args.china:
+                g['latitude'], g['longitude'] = \
+                transform_from_wgs_to_gcj(g['latitude'], g['longitude'])
             g['name'] = None
             g['pokemon'] = []
             g['raid'] = None
@@ -604,12 +867,14 @@ class Gym(LatLongModel):
             details = (GymDetails
                        .select(
                            GymDetails.gym_id,
-                           GymDetails.name)
+                           GymDetails.name,
+                           GymDetails.url)
                        .where(GymDetails.gym_id << gym_ids)
                        .dicts())
 
             for d in details:
                 gyms[d['gym_id']]['name'] = d['name']
+                gyms[d['gym_id']]['url'] = d['url']
 
             raids = (Raid
                      .select()
@@ -653,6 +918,7 @@ class Gym(LatLongModel):
                               Gym.team_id,
                               GymDetails.name,
                               GymDetails.description,
+                              GymDetails.url,
                               Gym.guard_pokemon_id,
                               Gym.slots_available,
                               Gym.latitude,
@@ -737,6 +1003,77 @@ class Gym(LatLongModel):
             if gym_by_id:
                 return gym_by_id[0]['park']
         return False
+
+    @staticmethod
+    def get_nearby_gyms(lat, lng, dist):
+        gyms = {}
+        with Gym.database().execution_context():
+            query = (Gym.select(
+                Gym.latitude, Gym.longitude, Gym.gym_id).dicts())
+
+            lat1 = lat - 0.1
+            lat2 = lat + 0.1
+            lng1 = lng - 0.1
+            lng2 = lng + 0.1
+            minlat = min(lat1, lat2)
+            maxlat = max(lat1, lat2)
+            minlng = min(lng1, lng2)
+            maxlng = max(lng1, lng2)
+
+            if dist > 0:
+                query = (query
+                         .where((((Gym.latitude >= minlat) &
+                                  (Gym.longitude >= minlng) &
+                                  (Gym.latitude <= maxlat) &
+                                  (Gym.longitude <= maxlng))))
+                         .dicts())
+
+            queryDict = query.dicts()
+
+            from .geofence import Geofences
+            geofences = Geofences()
+            if geofences.is_enabled():
+                results = []
+                for g in queryDict:
+                    results.append((round(g['latitude'], 5), round(g['longitude'], 5), 0))
+                results = geofences.get_geofenced_coordinates(results)
+                if not results:
+                    return []
+                for index, coords in enumerate(results):
+                    key = index
+                    latitude = coords[0]
+                    longitude = coords[1]
+                    distance = geopy.distance.vincenty((lat, lng), (latitude, longitude)).km
+                    if dist == 0 or distance <= dist:
+                        gyms[key] = {
+                            'latitude': latitude,
+                            'longitude': longitude,
+                            'distance': distance
+                        }
+            else:
+                for g in queryDict:
+                    key = g['gym_id']
+                    latitude = round(g['latitude'], 5)
+                    longitude = round(g['longitude'], 5)
+                    distance = geopy.distance.vincenty((lat, lng), (latitude, longitude)).km
+                    if dist == 0 or distance <= dist:
+                        gyms[key] = {
+                            'latitude': latitude,
+                            'longitude': longitude,
+                            'distance': distance
+                        }
+            orderedgyms = OrderedDict(sorted(gyms.items(), key=lambda x: x[1]['distance']))
+
+            result = []
+            while len(orderedgyms) > 0:
+                value = orderedgyms.items()[0][1]
+                result.append((value['latitude'], value['longitude']))
+                newlat = value['latitude']
+                newlong = value['longitude']
+                orderedgyms.popitem(last=False)
+                orderedgyms = OrderedDict(sorted(orderedgyms.items(), key=lambda x: geopy.distance.vincenty((newlat, newlong), (x[1]['latitude'], x[1]['longitude'])).km))
+
+        return result
 
 
 class Raid(BaseModel):
@@ -833,6 +1170,8 @@ class DeviceWorker(LatLongModel):
     last_updated = DateTimeField(index=True, default=datetime.utcnow)
     scans = UBigIntegerField(default=0)
     direction = Utf8mb4CharField(max_length=1, default="U")
+    fetch = Utf8mb4CharField(max_length=50, default='IDLE')
+    scanning = SmallIntegerField(default=0)
 
     @staticmethod
     def get_by_id(id, latitude=0, longitude=0):
@@ -853,9 +1192,55 @@ class DeviceWorker(LatLongModel):
                 'radius': 0,
                 'step': 0,
                 'scans': 0,
-                'direction' : 'U'
+                'direction': 'U',
+                'fetch': 'IDLE',
+                'scanning': 0
             }
         return result
+
+    @staticmethod
+    def get_all():
+        with DeviceWorker.database().execution_context():
+            query = (DeviceWorker
+                     .select()
+                     .dicts())
+
+        return list(query)
+
+    @staticmethod
+    def get_active():
+        with DeviceWorker.database().execution_context():
+            query = (DeviceWorker
+                     .select(DeviceWorker.deviceid,
+                             DeviceWorker.latitude,
+                             DeviceWorker.longitude,
+                             DeviceWorker.last_scanned,
+                             DeviceWorker.last_updated,
+                             DeviceWorker.scans,
+                             DeviceWorker.fetch,
+                             DeviceWorker.scanning)
+                     .where((DeviceWorker.scanning == 1) |
+                            (DeviceWorker.fetch != 'IDLE'))
+                     .dicts())
+
+        return list(query)
+
+    @staticmethod
+    def get_active_by_id(id):
+        with DeviceWorker.database().execution_context():
+            query = (DeviceWorker
+                     .select(DeviceWorker.deviceid,
+                             DeviceWorker.latitude,
+                             DeviceWorker.longitude,
+                             DeviceWorker.last_scanned,
+                             DeviceWorker.last_updated,
+                             DeviceWorker.scans,
+                             DeviceWorker.fetch,
+                             DeviceWorker.scanning)
+                     .where(DeviceWorker.id == id)
+                     .dicts())
+
+        return list(query)
 
 
 class ScannedLocation(LatLongModel):
@@ -940,6 +1325,11 @@ class ScannedLocation(LatLongModel):
                      .order_by(ScannedLocation.last_modified.asc())
                      .dicts())
 
+        if args.china:
+            for result in query:
+                result['latitude'], result['longitude'] = \
+                    transform_from_wgs_to_gcj(
+                        result['latitude'], result['longitude'])
         return list(query)
 
     # DB format of a new location.
@@ -1439,7 +1829,85 @@ class SpawnPoint(LatLongModel):
             del sp['latest_seen']
             del sp['earliest_unseen']
 
+        if args.china:
+            for result in spawnpoints.values():
+                result['latitude'], result['longitude'] = \
+                    transform_from_wgs_to_gcj(
+                        result['latitude'], result['longitude'])
+
         return list(spawnpoints.values())
+
+    @staticmethod
+    def get_nearby_spawnpoints(lat, lng, dist):
+        spawnpoints = {}
+        with SpawnPoint.database().execution_context():
+            query = (SpawnPoint.select(
+                SpawnPoint.latitude, SpawnPoint.longitude, SpawnPoint.id)
+                .dicts())
+
+            lat1 = lat - 0.1
+            lat2 = lat + 0.1
+            lng1 = lng - 0.1
+            lng2 = lng + 0.1
+            minlat = min(lat1, lat2)
+            maxlat = max(lat1, lat2)
+            minlng = min(lng1, lng2)
+            maxlng = max(lng1, lng2)
+
+            if dist > 0:
+                query = (query
+                         .where((((SpawnPoint.latitude >= minlat) &
+                                  (SpawnPoint.longitude >= minlng) &
+                                  (SpawnPoint.latitude <= maxlat) &
+                                  (SpawnPoint.longitude <= maxlng))))
+                         .dicts())
+
+            queryDict = query.dicts()
+
+            from .geofence import Geofences
+            geofences = Geofences()
+            if geofences.is_enabled():
+                results = []
+                for sp in queryDict:
+                    results.append((round(sp['latitude'], 5), round(sp['longitude'], 5), 0))
+                results = geofences.get_geofenced_coordinates(results)
+                if not results:
+                    return []
+                for index, coords in enumerate(results):
+                    key = index
+                    latitude = coords[0]
+                    longitude = coords[1]
+                    distance = geopy.distance.vincenty((lat, lng), (latitude, longitude)).km
+                    if dist == 0 or distance <= dist:
+                        spawnpoints[key] = {
+                            'latitude': latitude,
+                            'longitude': longitude,
+                            'distance': distance
+                        }
+            else:
+                for sp in queryDict:
+                    key = sp['id']
+                    latitude = round(sp['latitude'], 5)
+                    longitude = round(sp['longitude'], 5)
+                    distance = geopy.distance.vincenty((lat, lng), (latitude, longitude)).km
+                    if dist == 0 or distance <= dist:
+                        spawnpoints[key] = {
+                            'latitude': latitude,
+                            'longitude': longitude,
+                            'distance': distance
+                        }
+            orderedspawnpoints = OrderedDict(sorted(spawnpoints.items(), key=lambda x: x[1]['distance']))
+
+            result = []
+            while len(orderedspawnpoints) > 0:
+                value = orderedspawnpoints.items()[0][1]
+                result.append((value['latitude'], value['longitude']))
+                newlat = value['latitude']
+                newlong = value['longitude']
+                orderedspawnpoints.popitem(last=False)
+                orderedspawnpoints = OrderedDict(sorted(orderedspawnpoints.items(), key=lambda x: geopy.distance.vincenty((newlat, newlong), (x[1]['latitude'], x[1]['longitude'])).km))
+
+        return result
 
     # Confirm if TTH has been found.
     @staticmethod
@@ -1897,6 +2365,14 @@ class GymPokemon(BaseModel):
 
 class GymDetails(BaseModel):
     gym_id = Utf8mb4CharField(primary_key=True, max_length=50)
+    name = Utf8mb4CharField()
+    description = TextField(null=True, default="")
+    url = Utf8mb4CharField()
+    last_scanned = DateTimeField(default=datetime.utcnow)
+
+
+class PokestopDetails(BaseModel):
+    pokestop_id = Utf8mb4CharField(primary_key=True, max_length=50)
     name = Utf8mb4CharField()
     description = TextField(null=True, default="")
     url = Utf8mb4CharField()
@@ -3228,7 +3704,8 @@ def create_tables(db):
     tables = [Pokemon, Pokestop, Gym, Raid, ScannedLocation, GymDetails,
               GymMember, GymPokemon, MainWorker, WorkerStatus,
               SpawnPoint, ScanSpawnPoint, SpawnpointDetectionData,
-              Token, LocationAltitude, PlayerLocale, HashKeys, DeviceWorker, PokestopMember]
+              Token, LocationAltitude, PlayerLocale, HashKeys, DeviceWorker, PokestopMember,
+              Quest, PokestopDetails, Geofence]
     with db.execution_context():
         for table in tables:
             if not table.table_exists():
@@ -3244,7 +3721,8 @@ def drop_tables(db):
               GymDetails, GymMember, GymPokemon, MainWorker,
               WorkerStatus, SpawnPoint, ScanSpawnPoint,
               SpawnpointDetectionData, LocationAltitude, PlayerLocale,
-              Token, HashKeys, DeviceWorker, PokestopMember]
+              Token, HashKeys, DeviceWorker, PokestopMember,
+              Quest, PokestopDetails, Geofence]
     with db.execution_context():
         db.execute_sql('SET FOREIGN_KEY_CHECKS=0;')
         for table in tables:
@@ -3526,7 +4004,16 @@ def database_migrate(db, old_ver):
             migrator.add_column('gym', 'is_ex_raid_eligible', BooleanField(default=False))
         )
 
-    if old_ver < 43:
+    if old_ver < 45:
+        create_tables(db)
+
+    if old_ver < 46 and old_ver > 40:
+        migrate(
+            migrator.add_column('deviceworker', 'fetch', Utf8mb4CharField(max_length=50, default='IDLE')),
+            migrator.add_column('deviceworker', 'scanning', SmallIntegerField(default=0))
+        )
+
+    if old_ver < 47:
         create_tables(db)
 
     # Always log that we're done.

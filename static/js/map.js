@@ -68,6 +68,9 @@ var lastpokemon
 var lastslocs
 var lastspawns
 
+var polygons = []
+var geofencesSet = false
+
 var selectedStyle = 'light'
 
 var updateWorker
@@ -514,6 +517,7 @@ function initSidebar() {
     $('#pokemoncries').toggle(Store.get('playSound'))
     $('#cries-switch').prop('checked', Store.get('playCries'))
     $('#map-service-provider').val(Store.get('mapServiceProvider'))
+    $('#geofences-switch').prop('checked', Store.get('showGeofences'))
 
     // Only create the Autocomplete element if it's enabled in template.
     var elSearchBox = document.getElementById('next-location')
@@ -743,6 +747,12 @@ function gymLabel(gym, includeMembers = true) {
         if (raid.pokemon_id !== null) {
             let pMove1 = (moves[raid['move_1']] !== undefined) ? i8ln(moves[raid['move_1']]['name']) : 'unknown'
             let pMove2 = (moves[raid['move_2']] !== undefined) ? i8ln(moves[raid['move_2']]['name']) : 'unknown'
+            raidStr += `<div class='move'>
+                      <span class='name'>${pMove1}</span><span class='type ${moves[raid['move_1']]['type'].toLowerCase()}'>${i8ln(moves[raid['move_1']]['type'])}</span>
+                    </div>
+                    <div class='move'>
+                      <span class='name'>${pMove2}</span><span class='type ${moves[raid['move_2']]['type'].toLowerCase()}'>${i8ln(moves[raid['move_2']]['type'])}</span>
+                    </div>`
         }
     }
     const lastScannedStr = getDateStr(gym.last_scanned)
@@ -767,6 +777,7 @@ function gymLabel(gym, includeMembers = true) {
       <div class='gym name'>
         <span class='team ${gymTypes[gym.team_id].toLowerCase()}'>${titleText}</span>
       </div>`
+    const img = `<img class='gym img ${gymTypes[gym.team_id].toLowerCase()}' src='${gym.url}'>`
 
     if (gym.team_id !== 0) {
         subtitle = `
@@ -838,7 +849,7 @@ function gymLabel(gym, includeMembers = true) {
                 `
             }
         } else {
-			if (generateImages) {	
+			if (generateImages) {
 			    let gym_url = `gym_img?team=${gymTypes[gym.team_id]}&level=${getGymLevel(gym)}&raidlevel=${raid.level}`
                 if (isInBattle) {
                     gym_url += '&in_battle=1'
@@ -947,11 +958,12 @@ function gymLabel(gym, includeMembers = true) {
         })
         memberStr += '</div>'
     }
-	
+
     return `
         <div>
             <center>
                 ${title}
+                ${img}
                 ${subtitle}
                 ${image}
                 ${imageLbl}
@@ -966,6 +978,7 @@ function gymLabel(gym, includeMembers = true) {
 function pokestopLabel(pokestop, includeMembers = true) {
     var str
     var memberStr = ''
+    var questStr = ''
 
     var expireTime = pokestop['lure_expiration']
     var latitude = pokestop['latitude']
@@ -1019,6 +1032,13 @@ function pokestopLabel(pokestop, includeMembers = true) {
         memberStr += '</div>'
     }
 
+    if(pokestop.quest && pokestop.quest.type) {
+        questStr = `<div class='pokestop quest'>
+                        <img class='quest-icon' src='static/icons/${pokestop.quest.icon}.png'>
+                        <span class='quest-text'>${pokestop.quest.text}</span>
+                    </div>`
+    }
+
     pokestop.pokemon.forEach((member) => {
         hasNearby = true
     })
@@ -1030,19 +1050,29 @@ function pokestopLabel(pokestop, includeMembers = true) {
     if (hasNearby) {
         icon += '_Nearby'
     }
+    var iconSrc = `static/images/pokestop/${icon}.png`;
+    var titleText = pokestop.name ? pokestop.name : 'Pokestop';
+    var imgSrc;
+    if (pokestop.url) {
+        imgSrc = pokestop.url
+    } else {
+        imgSrc = iconSrc;
+    }
 
     if (expireTime) {
         str = `
             <div>
-              <div class='pokestop lure'>
-                Lured Pokéstop
+              <div class='pokestop name lure'>
+                ${titleText} (Lured)
               </div>
               <div class='pokestop-expire'>
                   <span class='label-countdown' disappears-at='${expireTime}'>00m00s</span> left (${moment(expireTime).format('HH:mm')})
               </div>
               <div>
-                <img class='pokestop sprite' src='static/images/pokestop/${icon}.png'>
+                <img class='pokestop pokestop-icon sprite' src='${iconSrc}'>
+                <img class='pokestop img' src='${imgSrc}'>
               </div>
+              ${questStr}
               ${memberStr}
               <div>
                 <span class='pokestop navigate'><a href='javascript:void(0);' onclick='javascript:openMapDirections(${latitude},${longitude});' title='Open in Google Maps'; class='pokestop lure'>${latitude.toFixed(6)}, ${longitude.toFixed(7)}</a></span>
@@ -1052,12 +1082,14 @@ function pokestopLabel(pokestop, includeMembers = true) {
     } else {
         str = `
             <div>
-              <div class='pokestop nolure'>
-                Pokéstop
+              <div class='pokestop name nolure'>
+                ${titleText}
               </div>
               <div>
-                <img class='pokestop sprite' src='static/images/pokestop/${icon}.png'>
+                <img class='pokestop pokestop-icon sprite' src='${iconSrc}'>
+                <img class='pokestop img' src='${imgSrc}'>
               </div>
+              ${questStr}
               ${memberStr}
               <div>
                 <span class='pokestop navigate'><a href='javascript:void(0);' onclick='javascript:openMapDirections(${latitude},${longitude});' title='Open in Google Maps'; class='pokestop nolure'>${latitude.toFixed(6)}, ${longitude.toFixed(7)}</a></span>
@@ -1093,6 +1125,28 @@ function spawnpointLabel(item) {
                 Every hour from ${formatSpawnTime(item.appear_time)} to ${formatSpawnTime(item.disappear_time)}
             </div>`
     }
+    return str
+}
+
+function geofenceLabel(item) {
+    var str
+    if (item.excluded) {
+        str = `
+            <div>
+                <b>Excluded Area</b>
+            </div>`
+    } else {
+        str = `
+            <div>
+                <b>Geofence</b>
+            </div>`
+    }
+
+    str += `
+        <div>
+            ${item.name}
+        </div>`
+
     return str
 }
 
@@ -1521,29 +1575,22 @@ function updateGymMarker(item, marker) {
 }
 
 function setupPokestopMarker(item) {
-    var imagename = item['lure_expiration'] ? 'PokestopLured' : item['lure_expiration'] & item['pokemon']['0'] ? 'PokestopLured_Nearby' : item['pokemon']['0'] ? 'Pokestop_Nearby' : 'Pokestop'
-    var image = {
-        url: 'static/images/pokestop/' + imagename + '.png',
-        scaledSize: new google.maps.Size(32, 32)
-    }
     var marker = new google.maps.Marker({
         position: {
             lat: item['latitude'],
             lng: item['longitude']
         },
         map: map,
-        zIndex: item['lure_expiration'] ? 3 : 2,
-        icon: image
     })
+    marker.infoWindow = new google.maps.InfoWindow({
+        content: '',
+        disableAutoPan: true
+    })
+    updatePokestopMarker(item, marker)
 
     if (!marker.rangeCircle && isRangeActive(map)) {
         marker.rangeCircle = addRangeCircle(marker, map, 'pokestop')
     }
-
-    marker.infoWindow = new google.maps.InfoWindow({
-        content: pokestopLabel(item),
-        disableAutoPan: true
-    })
 
     if (Store.get('usePokestopSidebar')) {
         marker.addListener('click', function () {
@@ -1576,6 +1623,31 @@ function setupPokestopMarker(item) {
     } else {
         addListeners(marker)
     }
+    return marker
+}
+
+function updatePokestopMarker(item, marker) {
+    const hasActiveLure = item['lure_expiration']
+    const hasNearby = Boolean(item.pokemon.length)
+
+    let markerImage = 'static/images/pokestop/Pokestop.png'
+
+    if (hasActiveLure) {
+        markerImage = markerImage.replace('.png', 'Lured.png')
+    }
+
+    if (hasNearby) {
+        markerImage = markerImage.replace('.png', '_Nearby.png')
+    }
+
+    marker.setIcon({
+        url: markerImage,
+        scaledSize: new google.maps.Size(32, 32)
+    })
+
+    marker.setZIndex(hasActiveLure ? 3 : 2)
+
+    marker.infoWindow.setContent(pokestopLabel(item))
     return marker
 }
 
@@ -1691,6 +1763,62 @@ function setupSpawnpointMarker(item) {
     addListeners(marker)
 
     return marker
+}
+
+function setupGeofencePolygon(item) {
+    var randomcolor = randomColor()
+    // Random with color seed randomColor({hue: 'pink'})
+    // Total random '#'+Math.floor(Math.random()*16777215).toString(16);
+    if (item.excluded === true) {
+        randomcolor = randomColor({hue: 'red'})
+    } else {
+        randomcolor = randomColor({hue: 'green'})
+    }
+
+    var polygon = new google.maps.Polygon({
+        map: map,
+        paths: item['coordinates'],
+        strokeColor: randomcolor,
+        strokeOpacity: 0.8,
+        strokeWeight: 2,
+        fillColor: randomcolor,
+        fillOpacity: 0.5
+    })
+
+    var markerPosition = polygonCenter(polygon)
+
+    polygon.infoWindow = new google.maps.InfoWindow({
+        content: geofenceLabel(item),
+        disableAutoPan: true,
+        position: markerPosition
+    })
+
+    addListeners(polygon)
+
+    return polygon
+}
+
+function polygonCenter(polygon) {
+    var hyp, Lat, Lng
+
+    var X = 0
+    var Y = 0
+    var Z = 0
+    polygon.getPath().forEach(function (vertex, inex) {
+        var lat
+        var lng
+        lat = vertex.lat() * Math.PI / 180
+        lng = vertex.lng() * Math.PI / 180
+        X += Math.cos(lat) * Math.cos(lng)
+        Y += Math.cos(lat) * Math.sin(lng)
+        Z += Math.sin(lat)
+    })
+
+    hyp = Math.sqrt(X * X + Y * Y)
+    Lat = Math.atan2(Z, hyp) * 180 / Math.PI
+    Lng = Math.atan2(Y, X) * 180 / Math.PI
+
+    return new google.maps.LatLng(Lat, Lng)
 }
 
 function clearSelection() {
@@ -1854,6 +1982,7 @@ function loadRawData() {
     var loadScanned = Store.get('showScanned')
     var loadSpawnpoints = Store.get('showSpawnpoints')
     var loadLuredOnly = Boolean(Store.get('showLuredPokestopsOnly'))
+    var loadGeofences = Store.get('showGeofences')
 
     var bounds = map.getBounds()
     var swPoint = bounds.getSouthWest()
@@ -1879,6 +2008,7 @@ function loadRawData() {
             'scanned': loadScanned,
             'lastslocs': lastslocs,
             'spawnpoints': loadSpawnpoints,
+            'geofences': loadGeofences,
             'lastspawns': lastspawns,
             'swLat': swLat,
             'swLng': swLng,
@@ -2009,10 +2139,12 @@ function processPokemon(item) {
     const isRarityExcluded = excludedRarity.indexOf(pokemonRarity) !== -1
     const isPokeExcludedByRarity = excludedPokemonByRarity.indexOf(item['pokemon_id']) !== -1
 
+    const needToAdd = (!(item['encounter_id'] in mapData.pokemons)) || ((item['cp'] > 0) && mapData.pokemons[item['encounter_id']]['cp'] == 0)
+
     var oldMarker = null
     var newMarker = null
 
-    if (!(item['encounter_id'] in mapData.pokemons) &&
+    if (needToAdd &&
          !isPokeExcluded && !isRarityExcluded && isPokeAlive) {
         // Add marker to map and item to dict.
         if (!item.hidden) {
@@ -2022,6 +2154,7 @@ function processPokemon(item) {
 
             if (item.marker) {
                 updatePokemonMarker(item.marker, map, scaleByRarity, isNotifyPkmn)
+                customizePokemonMarker(item.marker, item)
             } else {
                 newMarker = setupPokemonMarker(item, map, isBounceDisabled, scaleByRarity, isNotifyPkmn)
                 customizePokemonMarker(newMarker, item)
@@ -2267,6 +2400,26 @@ function updateSpawnPoints() {
     })
 }
 
+function updateGeofences(geofences) {
+    var i
+    if (!Store.get('showGeofences') && geofencesSet === true) {
+        for (i = 0; i < polygons.length; i++) {
+            polygons[i].setMap(null)
+        }
+        polygons = []
+        geofencesSet = false
+        return false
+    } else if (Store.get('showGeofences') && geofencesSet === false) {
+        var key
+        i = 0
+        for (key in geofences) {
+            polygons[i] = setupGeofencePolygon(geofences[key])
+            i++
+        }
+        geofencesSet = true
+    }
+}
+
 function updateMap() {
     loadRawData().done(function (result) {
         processPokemons(result.pokemons)
@@ -2288,6 +2441,7 @@ function updateMap() {
         updateScanned()
         updateSpawnPoints()
         updatePokestops()
+        updateGeofences(result.geofences)
 
         if ($('#stats').hasClass('visible')) {
             countMarkers(map)
@@ -3570,6 +3724,11 @@ $(function () {
         } else {
             Store.set('geoLocate', this.checked)
         }
+    })
+
+    $('#geofences-switch').change(function () {
+        Store.set('showGeofences', this.checked)
+        updateMap()
     })
 
     $('#lock-marker-switch').change(function () {

@@ -16,15 +16,38 @@ from flask.json import JSONEncoder
 from flask_compress import Compress
 
 from pogom.dyn_img import get_gym_icon, get_pokemon_map_icon, get_pokemon_raw_icon
+from base64 import b64decode
+
 from .models import (Pokemon, Gym, GymDetails, Pokestop, Raid, ScannedLocation,
-                     MainWorker, WorkerStatus, Token, HashKeys,
-                     SpawnPoint, DeviceWorker, SpawnpointDetectionData, ScanSpawnPoint, PokestopMember)
+                     MainWorker, WorkerStatus, Token,
+                     SpawnPoint, DeviceWorker, SpawnpointDetectionData, ScanSpawnPoint, PokestopMember,
+                     Quest, PokestopDetails, Geofence)
 from .utils import (get_args, get_pokemon_name, get_pokemon_types,
                     now, dottedQuadToNum, date_secs, clock_between)
 from .client_auth import check_auth
 from .transform import transform_from_wgs_to_gcj
 from .blacklist import fingerprints, get_ip_blacklist
 from .customLog import printPokemon
+
+import geopy
+
+from google.protobuf.json_format import MessageToJson
+from protos.pogoprotos.networking.responses.fort_search_response_pb2 import FortSearchResponse
+from protos.pogoprotos.networking.responses.encounter_response_pb2 import EncounterResponse
+from protos.pogoprotos.networking.responses.get_map_objects_response_pb2 import GetMapObjectsResponse
+
+from protos.pogoprotos.enums.team_color_pb2 import _TEAMCOLOR
+from protos.pogoprotos.enums.pokemon_id_pb2 import _POKEMONID
+from protos.pogoprotos.enums.pokemon_move_pb2 import _POKEMONMOVE
+from protos.pogoprotos.enums.raid_level_pb2 import _RAIDLEVEL
+from protos.pogoprotos.enums.gender_pb2 import _GENDER
+from protos.pogoprotos.enums.form_pb2 import _FORM
+from protos.pogoprotos.enums.costume_pb2 import _COSTUME
+from protos.pogoprotos.enums.weather_condition_pb2 import _WEATHERCONDITION
+
+#from protobuf_to_dict import protobuf_to_dict
+#from . import protos
+# from POGOProtos.Networking.Responses.FortSearchResponse_pb2 import FortSearchResponse
 
 log = logging.getLogger(__name__)
 compress = Compress()
@@ -41,6 +64,8 @@ def convert_pokemon_list(pokemon):
         p['pokemon_name'] = get_pokemon_name(p['pokemon_id'])
         p['pokemon_types'] = get_pokemon_types(p['pokemon_id'])
         p['encounter_id'] = str(p['encounter_id'])
+        if p['cp'] is None:
+            p['cp'] = 0
         if args.china:
             p['latitude'], p['longitude'] = \
                 transform_from_wgs_to_gcj(p['latitude'], p['longitude'])
@@ -87,6 +112,9 @@ class Pogom(Flask):
         self.route("/auth_callback", methods=['GET'])(self.auth_callback)
         self.route("/raw_data", methods=['GET'])(self.raw_data)
         self.route("/loc", methods=['GET'])(self.loc)
+        self.route("/walk_spawnpoint", methods=['POST'])(self.walk_spawnpoint)
+        self.route("/walk_pokestop", methods=['POST'])(self.walk_pokestop)
+        self.route("/teleport_gym", methods=['POST'])(self.teleport_gym)
         self.route("/scan_loc", methods=['POST'])(self.scan_loc)
         self.route("/teleport_loc", methods=['POST'])(self.teleport_loc)
         self.route("/next_loc", methods=['POST'])(self.next_loc)
@@ -97,15 +125,20 @@ class Pogom(Flask):
         self.route("/stats", methods=['GET'])(self.get_stats)
         self.route("/gym_data", methods=['GET'])(self.get_gymdata)
         self.route("/pokestop_data", methods=['GET'])(self.get_pokestopdata)
+        self.route("/get_deviceworkerdata", methods=['GET'])(self.get_deviceworkerdata)
         self.route("/submit_token", methods=['POST'])(self.submit_token)
         self.route("/robots.txt", methods=['GET'])(self.render_robots_txt)
         self.route("/webhook", methods=['POST'])(self.webhook)
         self.route("/serviceWorker.min.js", methods=['GET'])(
             self.render_service_worker_js)
         self.route("/feedpokemon", methods=['GET'])(self.feedpokemon)
+        self.route("/feedquest", methods=['GET'])(self.feedquest)
         self.route("/gym_img", methods=['GET'])(self.gym_img)
         self.route("/pkm_img", methods=['GET'])(self.pokemon_img)
+		
+        self.deviceschedules = {}
 
+        self.geofences = None
 		
     def pokemon_img(self):
         raw = 'raw' in request.args
@@ -120,7 +153,6 @@ class Pogom(Flask):
             filename = get_pokemon_map_icon(pkm, gender=gender, form=form, costume=costume, weather=weather)
         return send_file(filename, mimetype='image/png')
 
-    	
     def gym_img(self):
         team = request.args.get('team')
         level = request.args.get('level')
@@ -130,7 +162,6 @@ class Pogom(Flask):
         is_ex_raid_eligible = 'ex_raid' in request.args
         is_unknown = 'is_unknown' in request.args
         return send_file(get_gym_icon(team, level, raidlevel, pkm, is_in_battle, is_ex_raid_eligible, is_unknown), mimetype='image/png')
-
 
     def get_pokemon_rarity_code(self, pokemonid):
         rarity = self.get_pokemon_rarity(pokemonid)
@@ -153,6 +184,40 @@ class Pogom(Flask):
             rarity = data.get(str(pokemonid), "New Spawn")
 
         return rarity
+
+    def feedquest(self):
+        self.heartbeat[0] = now()
+        args = get_args()
+        if args.on_demand_timeout > 0:
+            self.control_flags['on_demand'].clear()
+
+        swLat = request.args.get('swLat')
+        swLng = request.args.get('swLng')
+        neLat = request.args.get('neLat')
+        neLng = request.args.get('neLng')
+
+        d = Quest.get_quests(swLat, swLng, neLat, neLng)
+
+        result = ""
+        for quest in d:
+#            log.info(quest)
+            if result != "":
+                result += "\n"
+            result += str(round(quest['latitude'], 5)) + "," + str(round(quest['longitude'], 5)) + ","
+            if quest["reward_type"] == "POKEMON_ENCOUNTER":
+                result += str(_POKEMONID.values_by_name[quest["reward_item"]].number)
+            else:
+                result += ""
+            result += "," + str(quest['quest_type']) + "," + str(quest["reward_type"])
+            if quest["reward_type"] != "STARDUST":
+                result += ": " + str(quest["reward_item"])
+            if quest["reward_type"] != "POKEMON_ENCOUNTER":
+                result += " (" + str(quest["reward_amount"]) + ")"
+            now_date = datetime.utcnow()
+            ttl = int(round((now_date - quest['last_scanned']).total_seconds() / 60))
+            result += ", Scanned " + str(ttl) + "m ago"
+
+        return result.strip()
 
     def feedpokemon(self):
         self.heartbeat[0] = now()
@@ -330,110 +395,63 @@ class Pogom(Flask):
     def render_service_worker_js(self):
         return send_from_directory('static/dist/js', 'serviceWorker.min.js')
 
-    def get_coords(self, pokemon_dict, pokestops_dict, gyms_dict):
-        minlat = None
-        maxlat = None
-        minlong = None
-        maxlong = None
-
-        if pokemon_dict:
-            for p in pokemon_dict:
-                if not minlat or p['lat'] < minlat:
-                    minlat = p['lat']
-                if not maxlat or p['lat'] > maxlat:
-                    maxlat = p['lat']
-                if not minlong or p['lon'] < minlong:
-                    minlong = p['lon']
-                if not maxlong or p['lon'] > maxlong:
-                    maxlong = p['lon']
-
-        if pokestops_dict:
-            for p in pokestops_dict:
-                if not minlat or p['latitude'] < minlat:
-                    minlat = p['latitude']
-                if not maxlat or p['latitude'] > maxlat:
-                    maxlat = p['latitude']
-                if not minlong or p['longitude'] < minlong:
-                    minlong = p['longitude']
-                if not maxlong or p['longitude'] > maxlong:
-                    maxlong = p['longitude']
-
-        if gyms_dict:
-            for p in gyms_dict:
-                if not minlat or p['latitude'] < minlat:
-                    minlat = p['latitude']
-                if not maxlat or p['latitude'] > maxlat:
-                    maxlat = p['latitude']
-                if not minlong or p['longitude'] < minlong:
-                    minlong = p['longitude']
-                if not maxlong or p['longitude'] > maxlong:
-                    maxlong = p['longitude']
-
-        if not minlat:
-            return self.current_location[0], self.current_location[1]
-
-        latitude = round((minlat + maxlat) / 2, 5)
-        longitude = round((minlong + maxlong) / 2, 5)
-
-        return latitude, longitude
-
     def webhook(self):
         request_json = request.get_json()
-        pokestops = request_json.get('pokestops')
-        pokemon = request_json.get('pokemon')
-        gyms = request_json.get('gyms')
-        nearby_pokemon = request_json.get('nearby_pokemon')
+        protos = request_json.get('protos')
+        trainerlvl = request_json.get('trainerlvl', 30)
 
         uuid = request_json.get('uuid')
         if uuid == "":
             return ""
 
-        lat = float(request_json.get('latitude', request_json.get('latitude:', 0)))
-        lng = float(request_json.get('longitude', request_json.get('longitude:', 0)))
+        if protos:
+            lat = float(request_json.get('latitude', request_json.get('latitude:', 0)))
+            lng = float(request_json.get('longitude', request_json.get('longitude:', 0)))
 
-        if lat == 0 and lng == 0:
-            lat, lng = self.get_coords(pokemon, pokestops, gyms)
+            # Geofence results.
+            if not self.geofences:
+                from .geofence import Geofences
+                self.geofences = Geofences()
+            if self.geofences.is_enabled():
+                results = self.geofences.get_geofenced_coordinates([(lat, lng, 0)])
+                if not results:
+                    log.info('The post from %s is coming from outside your geofences. Aborting post.' % uuid)
+                    return ""
 
-        if not self.args.dont_move_map:
-            self.location_queue.put((lat, lng, 0))
-            self.set_current_location((lat, lng, 0))
-            log.info('Changing next location: %s,%s', lat, lng)
+            if not self.args.dont_move_map:
+                self.location_queue.put((lat, lng, 0))
+                self.set_current_location((lat, lng, 0))
+                log.info('Changing next location: %s,%s', lat, lng)
 
-        deviceworker = DeviceWorker.get_by_id(uuid, lat, lng)
+            deviceworker = DeviceWorker.get_by_id(uuid, lat, lng)
 
-        deviceworker['scans'] = deviceworker['scans'] + 1
-        deviceworker['last_scanned'] = datetime.utcnow()
-        if (abs(deviceworker['centerlatitude'] - lat) > (deviceworker['radius'] + 100) * self.args.stepsize or abs(deviceworker['centerlongitude'] - lng) > (deviceworker['radius'] + 100) * self.args.stepsize):
-            deviceworker['centerlatitude'] = lat
-            deviceworker['centerlongitude'] = lng
-            deviceworker['radius'] = 0
-            deviceworker['step'] = 0
-            deviceworker['direction'] = "U"
-            deviceworker['latitude'] = lat
-            deviceworker['longitude'] = lng
+            deviceworker['scans'] = deviceworker['scans'] + 1
+            deviceworker['last_scanned'] = datetime.utcnow()
 
-        deviceworkers = {}
-        deviceworkers[uuid] = deviceworker
+            if deviceworker['scanning'] == 0:
+                deviceworker['scanning'] = 1
 
-        self.db_update_queue.put((DeviceWorker, deviceworkers))
+            deviceworkers = {}
+            deviceworkers[uuid] = deviceworker
 
-        return self.parse_map(pokemon, pokestops, gyms, nearby_pokemon, deviceworker)
+            self.db_update_queue.put((DeviceWorker, deviceworkers))
 
-    def parse_map(self, pokemon_dict, pokestops_dict, gyms_dict, nearby_pokemon_dict, deviceworker):
+            return self.parse_map_protos(protos, trainerlvl, deviceworker)
+        else:
+            return 'wrong'
+
+    def parse_map_protos(self, protos_dict, trainerlvl, deviceworker):
         pokemon = {}
         nearby_pokemons = {}
         pokestops = {}
         gyms = {}
         gym_details = {}
+        pokestop_details = {}
         raids = {}
+        quest_result = {}
         skipped = 0
         filtered = 0
         stopsskipped = 0
-        forts = []
-        forts_count = 0
-        wild_pokemon = []
-        wild_pokemon_count = 0
-        nearby_pokemon = 0
         spawn_points = {}
         scan_spawn_points = {}
         sightings = {}
@@ -446,400 +464,764 @@ class Pogom(Flask):
 
         scan_location = ScannedLocation.get_by_loc([deviceworker['latitude'], deviceworker['longitude']])
 
-        done_already = scan_location['done']
         ScannedLocation.update_band(scan_location, now_date)
-        just_completed = not done_already and scan_location['done']
 
-        if pokemon_dict:
-            encounter_ids = [p['id'] for p in pokemon_dict]
-            # For all the wild Pokemon we found check if an active Pokemon is in
-            # the database.
-            with Pokemon.database().execution_context():
-                query = (Pokemon
-                         .select(Pokemon.encounter_id, Pokemon.spawnpoint_id)
-                         .where((Pokemon.disappear_time >= now_date) &
-                                (Pokemon.encounter_id << encounter_ids))
-                         .dicts())
-
-                # Store all encounter_ids and spawnpoint_ids for the Pokemon in
-                # query.
-                # All of that is needed to make sure it's unique.
-                encountered_pokemon = [
-                    (p['encounter_id'], p['spawnpoint_id']) for p in query]
-
-            for p in pokemon_dict:
-                spawn_id = p['spawn_id']
-
-                sp = SpawnPoint.get_by_id(spawn_id, p['lat'], p['lon'])
-                sp['last_scanned'] = datetime.utcnow()
-                spawn_points[spawn_id] = sp
-                sp['missed_count'] = 0
-
-                sighting = {
-                    'encounter_id': p['id'],
-                    'spawnpoint_id': spawn_id,
-                    'scan_time': now_date,
-                    'tth_secs': None
-                }
-
-                # Keep a list of sp_ids to return.
-                sp_id_list.append(spawn_id)
-
-                # time_till_hidden_ms was overflowing causing a negative integer.
-                # It was also returning a value above 3.6M ms.
-                if 0 < p['despawn_time'] < 3600000:
-                    d_t_secs = date_secs(datetime.utcfromtimestamp(
-                        now() + p['despawn_time'] / 1000.0))
-
-                    # Cover all bases, make sure we're using values < 3600.
-                    # Warning: python uses modulo as the least residue, not as
-                    # remainder, so we don't apply it to the result.
-                    residue_unseen = sp['earliest_unseen'] % 3600
-                    residue_seen = sp['latest_seen'] % 3600
-
-                    if (residue_seen != residue_unseen or
-                            not sp['last_scanned']):
-                        log.info('TTH found for spawnpoint %s.', sp['id'])
-                        sighting['tth_secs'] = d_t_secs
-
-                        # Only update when TTH is seen for the first time.
-                        # Just before Pokemon migrations, Niantic sets all TTH
-                        # to the exact time of the migration, not the normal
-                        # despawn time.
-                        sp['latest_seen'] = d_t_secs
-                        sp['earliest_unseen'] = d_t_secs
-
-                scan_spawn_points[len(scan_spawn_points)+1] = {
-                    'spawnpoint': sp['id'],
-                    'scannedlocation': scan_location['cellid']}
-                if not sp['last_scanned']:
-                    log.info('New Spawn Point found.')
-                    new_spawn_points.append(sp)
-
-                sp['last_scanned'] = datetime.utcnow()
-
-                if ((p['id'], spawn_id) in encountered_pokemon):
-                    # If Pokemon has been encountered before don't process it.
-                    skipped += 1
+        for proto in protos_dict:
+            if "GetMapObjects" in proto:
+                gmo_response_string = b64decode(proto['GetMapObjects'])
+                gmo = GetMapObjectsResponse()
+                try:
+                    gmo.ParseFromString(gmo_response_string)
+                    gmo_response_json = json.loads(MessageToJson(gmo))
+                except:
                     continue
 
-                disappear_time = datetime.utcfromtimestamp(p['despawn_time'] / 1000.0)
+                if "mapCells" in gmo_response_json:
+                    for mapcell in gmo_response_json["mapCells"]:
+                        if "wildPokemons" in mapcell:
+                            encounter_ids = [p['encounterId'] for p in mapcell["wildPokemons"]]
+                            # For all the wild Pokemon we found check if an active Pokemon is in
+                            # the database.
+                            with Pokemon.database().execution_context():
+                                query = (Pokemon
+                                         .select(Pokemon.encounter_id, Pokemon.spawnpoint_id)
+                                         .where((Pokemon.disappear_time >= now_date) &
+                                                (Pokemon.encounter_id << encounter_ids))
+                                         .dicts())
 
-                start_end = SpawnPoint.start_end(sp, 1)
-                seconds_until_despawn = (start_end[1] - now_secs) % 3600
-                #disappear_time = now_date + \
-                #    timedelta(seconds=seconds_until_despawn)
+                                # Store all encounter_ids and spawnpoint_ids for the Pokemon in
+                                # query.
+                                # All of that is needed to make sure it's unique.
+                                encountered_pokemon = [
+                                    (p['encounter_id'], p['spawnpoint_id']) for p in query]
 
-                pokemon_id = p['type']
+                            for p in mapcell["wildPokemons"]:
+                                spawn_id = p['spawnPointId']
 
-                printPokemon(pokemon_id, p['lat'], p['lon'],
-                             disappear_time)
+                                sp = SpawnPoint.get_by_id(spawn_id, p['latitude'], p['longitude'])
+                                sp['last_scanned'] = datetime.utcnow()
+                                spawn_points[spawn_id] = sp
+                                sp['missed_count'] = 0
 
-                # Scan for IVs/CP and moves.
-                pokemon_info = False
+                                sighting = {
+                                    'encounter_id': p['encounterId'],
+                                    'spawnpoint_id': spawn_id,
+                                    'scan_time': now_date,
+                                    'tth_secs': None
+                                }
 
-                pokemon[p['id']] = {
-                    'encounter_id': p['id'],
-                    'spawnpoint_id': spawn_id,
-                    'pokemon_id': pokemon_id,
-                    'latitude': p['lat'],
-                    'longitude': p['lon'],
-                    'disappear_time': disappear_time,
-                    'individual_attack': None,
-                    'individual_defense': None,
-                    'individual_stamina': None,
-                    'move_1': None,
-                    'move_2': None,
-                    'cp': None,
-                    'cp_multiplier': None,
-                    'height': None,
-                    'weight': None,
-                    'gender': p['gender'],
-                    'costume': p['costume'],
-                    'form': p.get('form', 0),
-#                    'weather_id': p.get('weather', None),
-                    'weather_boosted_condition': p.get('weather', None)
-                }
-                if pokemon[p['id']]['costume'] < -1:
-                    pokemon[p['id']]['costume'] = -1
-                if pokemon[p['id']]['form'] < -1:
-                    pokemon[p['id']]['form'] = -1
+                                # Keep a list of sp_ids to return.
+                                sp_id_list.append(spawn_id)
 
-                if 'pokemon' in self.args.wh_types:
-                    if (pokemon_id in self.args.webhook_whitelist or
-                        (not self.args.webhook_whitelist and pokemon_id
-                         not in self.args.webhook_blacklist)):
-                        wh_poke = pokemon[p['id']].copy()
-                        wh_poke.update({
-                            'disappear_time': calendar.timegm(
-                                disappear_time.timetuple()),
-                            'last_modified_time': now(),
-                            'time_until_hidden_ms': p['despawn_time'],
-                            'verified': SpawnPoint.tth_found(sp),
-                            'seconds_until_despawn': seconds_until_despawn,
-                            'spawn_start': start_end[0],
-                            'spawn_end': start_end[1],
-                            'player_level': 30,
-                            'individual_attack': 0,
-                            'individual_defense': 0,
-                            'individual_stamina': 0,
-                            'move_1': 0,
-                            'move_2': 0,
-                            'cp': 0,
-                            'cp_multiplier': 0,
-                            'height': 0,
-                            'weight': 0,
-                            'weather_id': p.get('weather', None)
-                        })
+                                # time_till_hidden_ms was overflowing causing a negative integer.
+                                # It was also returning a value above 3.6M ms.
+                                if 0 < float(p['timeTillHiddenMs']) < 3600000:
+                                    d_t_secs = date_secs(datetime.utcfromtimestamp(
+                                        now() + float(p['timeTillHiddenMs']) / 1000.0))
 
-                        rarity = self.get_pokemon_rarity_code(pokemon_id)
-                        wh_poke.update({
-                            'rarity' : rarity
-                        })
+                                    # Cover all bases, make sure we're using values < 3600.
+                                    # Warning: python uses modulo as the least residue, not as
+                                    # remainder, so we don't apply it to the result.
+                                    residue_unseen = sp['earliest_unseen'] % 3600
+                                    residue_seen = sp['latest_seen'] % 3600
 
-                        self.wh_update_queue.put(('pokemon', wh_poke))
+                                    if (residue_seen != residue_unseen or
+                                            not sp['last_scanned']):
+                                        log.info('TTH found for spawnpoint %s.', sp['id'])
+                                        sighting['tth_secs'] = d_t_secs
 
-        if pokestops_dict:
-            stop_ids = [f['pokestop_id'] for f in pokestops_dict]
-            if stop_ids:
-                with Pokemon.database().execution_context():
-                    query = (Pokestop.select(
-                        Pokestop.pokestop_id, Pokestop.last_modified).where(
-                            (Pokestop.pokestop_id << stop_ids)).dicts())
-                    encountered_pokestops = [(f['pokestop_id'], int(
-                        (f['last_modified'] - datetime(1970, 1, 1)).total_seconds()))
-                                             for f in query]
+                                        # Only update when TTH is seen for the first time.
+                                        # Just before Pokemon migrations, Niantic sets all TTH
+                                        # to the exact time of the migration, not the normal
+                                        # despawn time.
+                                        sp['latest_seen'] = d_t_secs
+                                        sp['earliest_unseen'] = d_t_secs
 
-            for f in pokestops_dict:
-                if f['lure_expiration'] > 0:
-                    lure_expiration = (datetime.utcfromtimestamp(
-                        f['lure_expiration'] / 1000.0) +
-                        timedelta(minutes=self.args.lure_duration))
-                else:
-                    lure_expiration = None
-                if f['active_pokemon_id'] > 0:
-                    active_pokemon_id = f['active_pokemon_id']
-                else:
-                    active_pokemon_id = None
+                                scan_spawn_points[len(scan_spawn_points) + 1] = {
+                                    'spawnpoint': sp['id'],
+                                    'scannedlocation': scan_location['cellid']}
+                                if not sp['last_scanned']:
+                                    log.info('New Spawn Point found.')
+                                    new_spawn_points.append(sp)
 
-                if ((f['pokestop_id'], int(f['last_modified'] / 1000.0))
-                        in encountered_pokestops):
-                    # If pokestop has been encountered before and hasn't
-                    # changed don't process it.
-                    stopsskipped += 1
+                                if (not SpawnPoint.tth_found(sp) or sighting['tth_secs']):
+                                    SpawnpointDetectionData.classify(sp, scan_location, now_secs,
+                                                                     sighting)
+                                    sightings[p.encounter_id] = sighting
+
+                                sp['last_scanned'] = datetime.utcnow()
+
+                                if ((p['encounterId'], spawn_id) in encountered_pokemon):
+                                    # If Pokemon has been encountered before don't process it.
+                                    skipped += 1
+                                    continue
+
+                                start_end = SpawnPoint.start_end(sp, 1)
+                                seconds_until_despawn = (start_end[1] - now_secs) % 3600
+                                disappear_time = now_date + timedelta(seconds=seconds_until_despawn)
+
+                                pokemon_id = _POKEMONID.values_by_name[p['pokemonData']['pokemonId']].number
+
+                                gender = _GENDER.values_by_name[p['pokemonData']["pokemonDisplay"].get('gender', 'GENDER_UNSET')].number
+                                costume = _COSTUME.values_by_name[p['pokemonData']["pokemonDisplay"].get('costume', 'COSTUME_UNSET')].number
+                                form = _FORM.values_by_name[p['pokemonData']["pokemonDisplay"].get('form', 'FORM_UNSET')].number
+                                weather = _WEATHERCONDITION.values_by_name[p['pokemonData']["pokemonDisplay"].get('weatherBoostedCondition', 'NONE')].number
+
+                                printPokemon(pokemon_id, p['latitude'], p['longitude'],
+                                             disappear_time)
+
+                                pokemon[p['encounterId']] = {
+                                    'encounter_id': p['encounterId'],
+                                    'spawnpoint_id': spawn_id,
+                                    'pokemon_id': pokemon_id,
+                                    'latitude': p['latitude'],
+                                    'longitude': p['longitude'],
+                                    'disappear_time': disappear_time,
+                                    'individual_attack': None,
+                                    'individual_defense': None,
+                                    'individual_stamina': None,
+                                    'move_1': None,
+                                    'move_2': None,
+                                    'cp': None,
+                                    'cp_multiplier': None,
+                                    'height': None,
+                                    'weight': None,
+                                    'gender': gender,
+                                    'costume': costume,
+                                    'form': form,
+                                    'weather_boosted_condition': weather
+                                }
+
+                                if 'pokemon' in self.args.wh_types:
+                                    if (pokemon_id in self.args.webhook_whitelist or
+                                        (not self.args.webhook_whitelist and pokemon_id
+                                         not in self.args.webhook_blacklist)):
+                                        wh_poke = pokemon[p['encounterId']].copy()
+                                        wh_poke.update({
+                                            'disappear_time': calendar.timegm(
+                                                disappear_time.timetuple()),
+                                            'last_modified_time': now(),
+                                            'time_until_hidden_ms': float(p['timeTillHiddenMs']),
+                                            'verified': SpawnPoint.tth_found(sp),
+                                            'seconds_until_despawn': seconds_until_despawn,
+                                            'spawn_start': start_end[0],
+                                            'spawn_end': start_end[1],
+                                            'player_level': int(trainerlvl),
+                                            'individual_attack': 0,
+                                            'individual_defense': 0,
+                                            'individual_stamina': 0,
+                                            'move_1': 0,
+                                            'move_2': 0,
+                                            'cp': 0,
+                                            'cp_multiplier': 0,
+                                            'height': 0,
+                                            'weight': 0,
+                                            'weather_id': weather
+                                        })
+
+                                        rarity = self.get_pokemon_rarity_code(pokemon_id)
+                                        wh_poke.update({
+                                            'rarity': rarity
+                                        })
+
+                                        self.wh_update_queue.put(('pokemon', wh_poke))
+
+                        if "catchablePokemons" in mapcell:
+                            encounter_ids = [p['encounterId'] for p in mapcell["catchablePokemons"]]
+                            # For all the wild Pokemon we found check if an active Pokemon is in
+                            # the database.
+                            with Pokemon.database().execution_context():
+                                query = (Pokemon
+                                         .select(Pokemon.encounter_id, Pokemon.spawnpoint_id)
+                                         .where((Pokemon.disappear_time >= now_date) &
+                                                (Pokemon.encounter_id << encounter_ids))
+                                         .dicts())
+
+                                # Store all encounter_ids and spawnpoint_ids for the Pokemon in
+                                # query.
+                                # All of that is needed to make sure it's unique.
+                                encountered_pokemon = [
+                                    (p['encounter_id'], p['spawnpoint_id']) for p in query]
+
+                            for p in mapcell["catchablePokemons"]:
+                                spawn_id = p['spawnPointId']
+
+                                sp = SpawnPoint.get_by_id(spawn_id, p['latitude'], p['longitude'])
+                                sp['last_scanned'] = datetime.utcnow()
+                                spawn_points[spawn_id] = sp
+                                sp['missed_count'] = 0
+
+                                sighting = {
+                                    'encounter_id': p['encounterId'],
+                                    'spawnpoint_id': spawn_id,
+                                    'scan_time': now_date,
+                                    'tth_secs': None
+                                }
+
+                                # Keep a list of sp_ids to return.
+                                sp_id_list.append(spawn_id)
+
+                                # time_till_hidden_ms was overflowing causing a negative integer.
+                                # It was also returning a value above 3.6M ms.
+                                if float(p['expirationTimestampMs']) > 0:
+                                    d_t_secs = date_secs(datetime.utcfromtimestamp(float(p['expirationTimestampMs']) / 1000.0))
+
+                                    # Cover all bases, make sure we're using values < 3600.
+                                    # Warning: python uses modulo as the least residue, not as
+                                    # remainder, so we don't apply it to the result.
+                                    residue_unseen = sp['earliest_unseen'] % 3600
+                                    residue_seen = sp['latest_seen'] % 3600
+
+                                    if (residue_seen != residue_unseen or
+                                            not sp['last_scanned']):
+                                        log.info('TTH found for spawnpoint %s.', sp['id'])
+                                        sighting['tth_secs'] = d_t_secs
+
+                                        # Only update when TTH is seen for the first time.
+                                        # Just before Pokemon migrations, Niantic sets all TTH
+                                        # to the exact time of the migration, not the normal
+                                        # despawn time.
+                                        sp['latest_seen'] = d_t_secs
+                                        sp['earliest_unseen'] = d_t_secs
+
+                                scan_spawn_points[len(scan_spawn_points) + 1] = {
+                                    'spawnpoint': sp['id'],
+                                    'scannedlocation': scan_location['cellid']}
+                                if not sp['last_scanned']:
+                                    log.info('New Spawn Point found.')
+                                    new_spawn_points.append(sp)
+
+                                if (not SpawnPoint.tth_found(sp) or sighting['tth_secs']):
+                                    SpawnpointDetectionData.classify(sp, scan_location, now_secs,
+                                                                     sighting)
+                                    sightings[p.encounter_id] = sighting
+
+                                sp['last_scanned'] = datetime.utcnow()
+
+                                if ((p['encounterId'], spawn_id) in encountered_pokemon):
+                                    # If Pokemon has been encountered before don't process it.
+                                    skipped += 1
+                                    continue
+
+                                start_end = SpawnPoint.start_end(sp, 1)
+                                seconds_until_despawn = (start_end[1] - now_secs) % 3600
+                                disappear_time = now_date + timedelta(seconds=seconds_until_despawn)
+
+                                pokemon_id = _POKEMONID.values_by_name[p['pokemonId']].number
+
+                                gender = _GENDER.values_by_name[p["pokemonDisplay"].get('gender', 'GENDER_UNSET')].number
+                                costume = _COSTUME.values_by_name[p["pokemonDisplay"].get('costume', 'COSTUME_UNSET')].number
+                                form = _FORM.values_by_name[p["pokemonDisplay"].get('form', 'FORM_UNSET')].number
+                                weather = _WEATHERCONDITION.values_by_name[p["pokemonDisplay"].get('weatherBoostedCondition', 'NONE')].number
+
+                                printPokemon(pokemon_id, p['latitude'], p['longitude'],
+                                             disappear_time)
+
+                                pokemon[p['encounterId']] = {
+                                    'encounter_id': p['encounterId'],
+                                    'spawnpoint_id': spawn_id,
+                                    'pokemon_id': pokemon_id,
+                                    'latitude': p['latitude'],
+                                    'longitude': p['longitude'],
+                                    'disappear_time': disappear_time,
+                                    'individual_attack': None,
+                                    'individual_defense': None,
+                                    'individual_stamina': None,
+                                    'move_1': None,
+                                    'move_2': None,
+                                    'cp': None,
+                                    'cp_multiplier': None,
+                                    'height': None,
+                                    'weight': None,
+                                    'gender': gender,
+                                    'costume': costume,
+                                    'form': form,
+                                    'weather_boosted_condition': weather
+                                }
+
+                                if 'pokemon' in self.args.wh_types:
+                                    if (pokemon_id in self.args.webhook_whitelist or
+                                        (not self.args.webhook_whitelist and pokemon_id
+                                         not in self.args.webhook_blacklist)):
+                                        wh_poke = pokemon[p['encounterId']].copy()
+                                        wh_poke.update({
+                                            'disappear_time': calendar.timegm(
+                                                disappear_time.timetuple()),
+                                            'last_modified_time': now(),
+                                            'time_until_hidden_ms': float(p['expirationTimestampMs']),
+                                            'verified': SpawnPoint.tth_found(sp),
+                                            'seconds_until_despawn': seconds_until_despawn,
+                                            'spawn_start': start_end[0],
+                                            'spawn_end': start_end[1],
+                                            'player_level': int(trainerlvl),
+                                            'individual_attack': 0,
+                                            'individual_defense': 0,
+                                            'individual_stamina': 0,
+                                            'move_1': 0,
+                                            'move_2': 0,
+                                            'cp': 0,
+                                            'cp_multiplier': 0,
+                                            'height': 0,
+                                            'weight': 0,
+                                            'weather_id': weather
+                                        })
+
+                                        rarity = self.get_pokemon_rarity_code(pokemon_id)
+                                        wh_poke.update({
+                                            'rarity': rarity
+                                        })
+
+                                        self.wh_update_queue.put(('pokemon', wh_poke))
+
+                        if "nearbyPokemons" in mapcell:
+                            nearby_encounter_ids = [p['encounterId'] for p in mapcell["nearbyPokemons"]]
+                            # For all the wild Pokemon we found check if an active Pokemon is in
+                            # the database.
+                            with PokestopMember.database().execution_context():
+                                query = (PokestopMember
+                                         .select(PokestopMember.encounter_id, PokestopMember.pokestop_id)
+                                         .where((PokestopMember.disappear_time >= now_date) &
+                                                (PokestopMember.encounter_id << nearby_encounter_ids))
+                                         .dicts())
+
+                                # Store all encounter_ids and spawnpoint_ids for the Pokemon in
+                                # query.
+                                # All of that is needed to make sure it's unique.
+                                nearby_encountered_pokemon = [
+                                    (p['encounter_id'], p['pokestop_id']) for p in query]
+
+                            for p in mapcell["nearbyPokemons"]:
+                                pokestop_id = p.get('fortId')
+                                if not pokestop_id:
+                                    continue
+                                encounter_id = p.get('encounterId')
+                                if not encounter_id:
+                                    continue
+                                if ((encounter_id, pokestop_id) in nearby_encountered_pokemon):
+                                    # If Pokemon has been encountered before don't process it.
+                                    skipped += 1
+                                    continue
+
+                                disappear_time = now_date + timedelta(seconds=600)
+
+                                pokemon_id = _POKEMONID.values_by_name[p['pokemonId']].number
+
+                                distance = round(p.get('distanceInMeters', 0), 5)
+
+                                gender = _GENDER.values_by_name[p["pokemonDisplay"].get('gender', 'GENDER_UNSET')].number
+                                costume = _COSTUME.values_by_name[p["pokemonDisplay"].get('costume', 'COSTUME_UNSET')].number
+                                form = _FORM.values_by_name[p["pokemonDisplay"].get('form', 'FORM_UNSET')].number
+                                weather = _WEATHERCONDITION.values_by_name[p["pokemonDisplay"].get('weatherBoostedCondition', 'NONE')].number
+
+                                nearby_pokemons[encounter_id] = {
+                                    'encounter_id': encounter_id,
+                                    'pokestop_id': p['fortId'],
+                                    'pokemon_id': pokemon_id,
+                                    'disappear_time': disappear_time,
+                                    'gender': gender,
+                                    'costume': costume,
+                                    'form': form,
+                                    'weather_boosted_condition': weather,
+                                    'distance': distance
+                                }
+                                if nearby_pokemons[encounter_id]['costume'] < -1:
+                                    nearby_pokemons[encounter_id]['costume'] = -1
+                                if nearby_pokemons[encounter_id]['form'] < -1:
+                                    nearby_pokemons[encounter_id]['form'] = -1
+
+                                pokestopdetails = Pokestop.get_pokestop_details(p['fortId'])
+                                pokestop_url = p.get('fortImageUrl', "")
+                                if pokestopdetails:
+                                    pokestop_name = pokestopdetails.get("name")
+                                    pokestop_description = pokestopdetails.get("description")
+                                    pokestop_url = pokestop_url if pokestop_url != "" else pokestopdetails["url"]
+
+                                    pokestop_details[p['fortId']] = {
+                                        'pokestop_id': p['fortId'],
+                                        'name': pokestop_name,
+                                        'description': pokestop_description,
+                                        'url': pokestop_url
+                                    }
+
+                        if "forts" in mapcell:
+                            stop_ids = [f['id'] for f in mapcell["forts"]]
+                            if stop_ids:
+                                with Pokemon.database().execution_context():
+                                    query = (Pokestop.select(
+                                        Pokestop.pokestop_id, Pokestop.last_modified).where(
+                                            (Pokestop.pokestop_id << stop_ids)).dicts())
+                                    encountered_pokestops = [(f['pokestop_id'], int(
+                                        (f['last_modified'] - datetime(1970, 1, 1)).total_seconds()))
+                                        for f in query]
+                            for fort in mapcell["forts"]:
+                                if fort.get("type") == "CHECKPOINT":
+                                    if ((fort['id'], int(float(fort['lastModifiedTimestampMs']) / 1000.0))
+                                            in encountered_pokestops):
+                                        # If pokestop has been encountered before and hasn't
+                                        # changed don't process it.
+                                        continue
+
+                                    if float(fort.get('lure_expiration', 0)) > 0:
+                                        lure_expiration = (datetime.utcfromtimestamp(
+                                            float(fort.get('lure_expiration')) / 1000.0) +
+                                            timedelta(minutes=self.args.lure_duration))
+                                    else:
+                                        lure_expiration = None
+                                    if fort.get('active_pokemon_id', 0) > 0:
+                                        active_pokemon_id = fort.get('active_pokemon_id')
+                                    else:
+                                        active_pokemon_id = None
+
+                                    pokestops[fort['id']] = {
+                                        'pokestop_id': fort['id'],
+                                        'enabled': fort['enabled'],
+                                        'latitude': fort['latitude'],
+                                        'longitude': fort['longitude'],
+                                        'last_modified': datetime.utcfromtimestamp(
+                                            float(fort['lastModifiedTimestampMs']) / 1000.0),
+                                        'lure_expiration': lure_expiration,
+                                        'active_fort_modifier': active_pokemon_id
+                                    }
+
+                                    pokestopdetails = Pokestop.get_pokestop_details(fort['id'])
+                                    pokestop_name = str(fort['latitude']) + ',' + str(fort['longitude'])
+                                    pokestop_description = ""
+                                    pokestop_url = fort.get('imageUrl', "")
+                                    if pokestopdetails:
+                                        pokestop_name = pokestopdetails.get("name", pokestop_name)
+                                        pokestop_description = pokestopdetails.get("description", pokestop_description)
+                                        pokestop_url = pokestop_url if pokestop_url != "" else pokestopdetails["url"]
+
+                                    pokestop_details[fort['id']] = {
+                                        'pokestop_id': fort['id'],
+                                        'name': pokestop_name,
+                                        'description': pokestop_description,
+                                        'url': pokestop_url
+                                    }
+
+                                    if 'pokestop' in self.args.wh_types or (
+                                            'lure' in self.args.wh_types and
+                                            lure_expiration is not None):
+                                        l_e = None
+                                        if lure_expiration is not None:
+                                            l_e = calendar.timegm(lure_expiration.timetuple())
+                                        wh_pokestop = pokestops[fort['id']].copy()
+                                        wh_pokestop.update({
+                                            'pokestop_id': fort['id'],
+                                            'last_modified': float(fort['lastModifiedTimestampMs']),
+                                            'lure_expiration': l_e,
+                                        })
+                                        self.wh_update_queue.put(('pokestop', wh_pokestop))
+                                else:
+                                    b64_gym_id = str(fort['id'])
+                                    park = Gym.get_gyms_park(fort['id'])
+
+                                    gyms[fort['id']] = {
+                                        'gym_id':
+                                            fort['id'],
+                                        'team_id':
+                                            _TEAMCOLOR.values_by_name[fort.get('ownedByTeam', 'NEUTRAL')].number,
+                                        'park':
+                                            park,
+                                        'guard_pokemon_id':
+                                            _POKEMONID.values_by_name[fort.get('guardPokemonId', 'MISSINGNO')].number,
+                                        'slots_available':
+                                            fort["gymDisplay"].get('slotsAvailable', 0),
+                                        'total_cp':
+                                            fort["gymDisplay"].get('totalGymCp', 0),
+                                        'enabled':
+                                            fort['enabled'],
+                                        'latitude':
+                                            fort['latitude'],
+                                        'longitude':
+                                            fort['longitude'],
+                                        'last_modified':
+                                            datetime.utcfromtimestamp(
+                                                float(fort['lastModifiedTimestampMs']) / 1000.0),
+                                        'is_in_battle':
+                                            fort.get('isInBattle', False),
+                                        'is_ex_raid_eligible':
+                                            fort.get('isExRaidEligible', False)
+                                    }
+
+                                    gym_id = fort['id']
+
+                                    gymdetails = Gym.get_gym_details(gym_id)
+                                    gym_name = str(fort['latitude']) + ',' + str(fort['longitude'])
+                                    gym_description = ""
+                                    gym_url = fort.get('imageUrl', "")
+                                    if gymdetails:
+                                        gym_name = gymdetails.get("name", gym_name)
+                                        gym_description = gymdetails.get("description", gym_description)
+                                        gym_url = gym_url if gym_url != "" else gymdetails["url"]
+
+                                    gym_details[gym_id] = {
+                                        'gym_id': gym_id,
+                                        'name': gym_name,
+                                        'description': gym_description,
+                                        'url': gym_url
+                                    }
+
+                                    if 'gym' in self.args.wh_types:
+                                        raid_active_until = 0
+                                        if 'raidInfo' in fort and not fort["raidInfo"].get('complete', False):
+                                            raid_battle_ms = float(fort['raidInfo']['raidBattleMs'])
+                                            raid_end_ms = float(fort['raidInfo']['raidEndMs'])
+
+                                            if raid_battle_ms / 1000 > time.time():
+                                                raid_active_until = raid_end_ms / 1000
+
+                                        # Explicitly set 'webhook_data', in case we want to change
+                                        # the information pushed to webhooks.  Similar to above
+                                        # and previous commits.
+                                        wh_gym = gyms[fort['id']].copy()
+
+                                        wh_gym.update({
+                                            'gym_id':
+                                                b64_gym_id,
+                                            'gym_name':
+                                                gym_name,
+                                            'lowest_pokemon_motivation':
+                                                float(fort["gymDisplay"].get('lowestPokemonMotivation', 0)),
+                                            'occupied_since':
+                                                float(fort["gymDisplay"].get('occupiedMillis', 0)),
+                                            'last_modified':
+                                                float(fort['lastModifiedTimestampMs']),
+                                            'raid_active_until':
+                                                raid_active_until,
+                                        })
+
+                                        self.wh_update_queue.put(('gym', wh_gym))
+
+                                    if 'gym-info' in self.args.wh_types:
+                                        webhook_data = {
+                                            'id': str(gym_id),
+                                            'latitude': fort['latitude'],
+                                            'longitude': fort['longitude'],
+                                            'team': _TEAMCOLOR.values_by_name[fort.get('ownedByTeam', 'NEUTRAL')].number,
+                                            'name': gym_name,
+                                            'description': gym_description,
+                                            'url': gym_url,
+                                            'pokemon': [],
+                                        }
+
+                                        self.wh_update_queue.put(('gym_details', webhook_data))
+
+                                    if 'raidInfo' in fort and not fort["raidInfo"].get('complete', False):
+                                        raidinfo = fort["raidInfo"]
+                                        raidpokemonid = raidinfo['raidPokemon']['pokemonId'] if 'raidPokemon' in raidinfo and 'pokemonId' in raidinfo['raidPokemon'] else None
+                                        if raidpokemonid:
+                                            raidpokemonid = _POKEMONID.values_by_name[raidpokemonid].number
+                                        raidpokemoncp = raidinfo['raidPokemon']['cp'] if 'raidPokemon' in raidinfo and 'cp' in raidinfo['raidPokemon'] else None
+                                        raidpokemonmove1 = raidinfo['raidPokemon']['move1'] if 'raidPokemon' in raidinfo and 'move1' in raidinfo['raidPokemon'] else None
+                                        if raidpokemonmove1:
+                                            raidpokemonmove1 = _POKEMONMOVE.values_by_name[raidpokemonmove1].number
+                                        raidpokemonmove2 = raidinfo['raidPokemon']['move2'] if 'raidPokemon' in raidinfo and 'move2' in raidinfo['raidPokemon'] else None
+                                        if raidpokemonmove2:
+                                            raidpokemonmove2 = _POKEMONMOVE.values_by_name[raidpokemonmove2].number
+
+                                        raids[fort['id']] = {
+                                            'gym_id': fort['id'],
+                                            'level': _RAIDLEVEL.values_by_name[raidinfo['raidLevel']].number,
+                                            'spawn': datetime.utcfromtimestamp(
+                                                float(raidinfo['raidSpawnMs']) / 1000.0),
+                                            'start': datetime.utcfromtimestamp(
+                                                float(raidinfo['raidBattleMs']) / 1000.0),
+                                            'end': datetime.utcfromtimestamp(
+                                                float(raidinfo['raidEndMs']) / 1000.0),
+                                            'pokemon_id': raidpokemonid,
+                                            'cp': raidpokemoncp,
+                                            'move_1': raidpokemonmove1,
+                                            'move_2': raidpokemonmove2
+                                        }
+
+                                        if ('egg' in self.args.wh_types and
+                                                ('raidPokemon' not in raidinfo or 'pokemonId' not in raidinfo['raidPokemon'])) or (
+                                                    'raid' in self.args.wh_types and
+                                                    'raidPokemon' in raidinfo and 'pokemonId' in raidinfo['raidPokemon']):
+                                            wh_raid = raids[fort['id']].copy()
+                                            wh_raid.update({
+                                                'gym_id': b64_gym_id,
+                                                'team_id': _TEAMCOLOR.values_by_name[fort.get('ownedByTeam', 'NEUTRAL')].number,
+                                                'spawn': float(raidinfo['raidSpawnMs']) / 1000,
+                                                'start': float(raidinfo['raidBattleMs']) / 1000,
+                                                'end': float(raidinfo['raidEndMs']) / 1000,
+                                                'latitude': fort['latitude'],
+                                                'longitude': fort['longitude'],
+                                                'cp': raidpokemoncp,
+                                                'move_1': raidpokemonmove1 if raidpokemonmove1 else 0,
+                                                'move_2': raidpokemonmove2 if raidpokemonmove2 else 0,
+                                                'is_ex_raid_eligible':
+                                                    fort.get('isExRaidEligible', False),
+                                                'name': gym_name,
+                                                'description': gym_description,
+                                                'url': gym_url,
+
+                                            })
+                                            self.wh_update_queue.put(('raid', wh_raid))
+
+        for proto in protos_dict:
+            if "FortSearchResponse" in proto:
+                fort_search_response_string = b64decode(proto['FortSearchResponse'])
+
+                frs = FortSearchResponse()
+
+                try:
+                    frs.ParseFromString(fort_search_response_string)
+                    fort_search_response_json = json.loads(MessageToJson(frs))
+                except:
                     continue
-                pokestops[f['pokestop_id']] = {
-                    'pokestop_id': f['pokestop_id'],
-                    'enabled': f['enabled'],
-                    'latitude': f['latitude'],
-                    'longitude': f['longitude'],
-                    'last_modified': datetime.utcfromtimestamp(
-                        f['last_modified'] / 1000.0),
-                    'lure_expiration': lure_expiration,
-                    'active_fort_modifier': active_pokemon_id
-                }
 
-                # Send all pokestops to webhooks.
-                if 'pokestop' in self.args.wh_types or (
-                        'lure' in self.args.wh_types and
-                        lure_expiration is not None):
-                    l_e = None
-                    if lure_expiration is not None:
-                        l_e = calendar.timegm(lure_expiration.timetuple())
-                    wh_pokestop = pokestops[f['pokestop_id']].copy()
-                    wh_pokestop.update({
-                        'pokestop_id': f['pokestop_id'],
-                        'last_modified': f['last_modified'],
-                        'lure_expiration': l_e,
-                    })
-                    self.wh_update_queue.put(('pokestop', wh_pokestop))
+                if 'challengeQuest' in fort_search_response_json:
+                    quest_json = fort_search_response_json["challengeQuest"]["quest"]
+                    quest_result[quest_json['fortId']] = {
+                        'pokestop_id': quest_json['fortId'],
+                        'quest_type': quest_json['questType'],
+                        'goal': quest_json['goal']['target'],
+                        'reward_type': quest_json['questRewards'][0]['type'],
+                    }
+                    if quest_json["questRewards"][0]["type"] == "STARDUST":
+                        quest_result[quest_json["fortId"]]["reward_amount"] = quest_json["questRewards"][0]["stardust"]
+                    elif quest_json["questRewards"][0]["type"] == "POKEMON_ENCOUNTER":
+                        quest_result[quest_json["fortId"]]["reward_item"] = quest_json["questRewards"][0]["pokemonEncounter"]["pokemonId"]
+                    elif quest_json["questRewards"][0]["type"] == "ITEM":
+                        quest_result[quest_json["fortId"]]["reward_amount"] = quest_json["questRewards"][0]["item"]["amount"]
+                        quest_result[quest_json["fortId"]]["reward_item"] = quest_json["questRewards"][0]["item"]["item"]
 
-        if gyms_dict:
-            stop_ids = [f['gym_id'] for f in gyms_dict]
-            for f in gyms_dict:
-                b64_gym_id = str(f['gym_id'])
-                park = Gym.get_gyms_park(f['gym_id'])
+                    if 'quest' in self.args.wh_types:
+                        wh_quest = quest_result[quest_json["fortId"]].copy()
+                        quest_pokestop = pokestops.get(quest_json["fortId"], Pokestop.get_stop(quest_json["fortId"]))
+                        if quest_pokestop:
+                            wh_quest.update(
+                                {
+                                    "latitude": quest_pokestop["latitude"],
+                                    "longitude": quest_pokestop["longitude"]
+                                }
+                            )
+                        self.wh_update_queue.put(('quest', wh_quest))
 
-                if 'gym' in self.args.wh_types:
-                    raid_active_until = 0
-                    raid_battle_ms = f['raidBattleMs']
-                    raid_end_ms = f['raidEndMs']
+            if "EncounterResponse" in proto and int(trainerlvl) >= 30:
+                encounter_response_string = b64decode(proto['EncounterResponse'])
+                encounter = EncounterResponse()
+                try:
+                    encounter.ParseFromString(encounter_response_string)
+                    encounter_response_json = json.loads(MessageToJson(encounter))
+                except:
+                    continue
 
-                    if raid_battle_ms / 1000 > time.time():
-                        raid_active_until = raid_end_ms / 1000
+                if "wildPokemon" in encounter_response_json:
+                    wildpokemon = encounter_response_json["wildPokemon"]
 
-                    # Explicitly set 'webhook_data', in case we want to change
-                    # the information pushed to webhooks.  Similar to above
-                    # and previous commits.
-                    self.wh_update_queue.put(('gym', {
-                        'gym_id':
-                            b64_gym_id,
-                        'team_id':
-                            f['team'],
-                        'park':
-                            park,
-                        'guard_pokemon_id':
-                            f['guardingPokemonIdentifier'],
-                        'slots_available':
-                            f['slotsAvailble'],
-                        'total_cp':
-                            0,
-                        'enabled':
-                            f['enabled'],
-                        'latitude':
-                            f['latitude'],
-                        'longitude':
-                            f['longitude'],
-                        'lowest_pokemon_motivation':
-                            0,
-                        'occupied_since':
-                            calendar.timegm((datetime.utcnow()).timetuple()),
-                        'last_modified':
-                            f['lastModifiedTimestampMs'],
-                        'raid_active_until':
-                            raid_active_until
-                    }))
+                    spawn_id = wildpokemon['spawnPointId']
 
-                gyms[f['gym_id']] = {
-                    'gym_id':
-                        f['gym_id'],
-                    'team_id':
-                        f['team'],
-                    'park':
-                        park,
-                    'guard_pokemon_id':
-                        f['guardingPokemonIdentifier'],
-                    'slots_available':
-                        f['slotsAvailble'],
-                    'total_cp':
-                        0,
-                    'enabled':
-                        f['enabled'],
-                    'latitude':
-                        f['latitude'],
-                    'longitude':
-                        f['longitude'],
-                    'last_modified':
-                        datetime.utcfromtimestamp(
-                            f['lastModifiedTimestampMs'] / 1000.0),
-                    'is_in_battle':
-                        f.get('isInBattle', False),
-                    'is_ex_raid_eligible':
-                        f.get('isExRaidEligible', False)
-                }
+                    sp = SpawnPoint.get_by_id(spawn_id, wildpokemon['latitude'], wildpokemon['longitude'])
+                    sp['last_scanned'] = datetime.utcnow()
+                    spawn_points[spawn_id] = sp
+                    sp['missed_count'] = 0
 
-                gym_id = f['gym_id']
-
-                gymdetails = Gym.get_gym_details(gym_id)
-                gym_name = str(f['latitude']) + ',' + str(f['longitude'])
-                gym_description = ""
-                gym_url = f['imageURL']
-                if gymdetails:
-                    gym_name = gymdetails.get("name", gym_name)
-                    gym_description = gymdetails.get("description", gym_description)
-                    gym_url = gymdetails["url"] if gymdetails["url"] != "" else gym_url
-
-                gym_details[gym_id] = {
-                    'gym_id': gym_id,
-                    'name': gym_name,
-                    'description': gym_description,
-                    'url': gym_url
-                }
-
-                if f['raidSpawnMs'] > 0:
-                    raids[f['gym_id']] = {
-                        'gym_id': f['gym_id'],
-                        'level': f['raidLevel'],
-                        'spawn': datetime.utcfromtimestamp(
-                            f['raidSpawnMs'] / 1000.0),
-                        'start': datetime.utcfromtimestamp(
-                            f['raidBattleMs'] / 1000.0),
-                        'end': datetime.utcfromtimestamp(
-                            f['raidEndMs'] / 1000.0),
-                        'pokemon_id': f['raidPokemon'] if f['raidPokemon'] > 0 else None,
-                        'cp': None,
-                        'move_1': None,
-                        'move_2': None
+                    sighting = {
+                        'encounter_id': wildpokemon['encounterId'],
+                        'spawnpoint_id': spawn_id,
+                        'scan_time': now_date,
+                        'tth_secs': None
                     }
 
-                    if ('egg' in self.args.wh_types and
-                            f['raidPokemon'] == 0) or (
-                                'raid' in self.args.wh_types and
-                                f['raidPokemon'] > 0):
-                        wh_raid = raids[f['gym_id']].copy()
-                        wh_raid.update({
-                            'gym_id': b64_gym_id,
-                            'team_id': f['team'],
-                            'spawn': f['raidSpawnMs'] / 1000,
-                            'start': f['raidBattleMs'] / 1000,
-                            'end': f['raidEndMs'] / 1000,
-                            'latitude': f['latitude'],
-                            'longitude': f['longitude'],
-                            'cp': 0,
-                            'move_1': 0,
-                            'move_2': 0,
-                            'is_ex_raid_eligible' :
-                                f.get('isExRaidEligible', False)
-                        })
-                        self.wh_update_queue.put(('raid', wh_raid))
+                    # Keep a list of sp_ids to return.
+                    sp_id_list.append(spawn_id)
 
-            del forts
+                    scan_spawn_points[len(scan_spawn_points) + 1] = {
+                        'spawnpoint': sp['id'],
+                        'scannedlocation': scan_location['cellid']}
+                    if not sp['last_scanned']:
+                        log.info('New Spawn Point found.')
+                        new_spawn_points.append(sp)
 
-        if nearby_pokemon_dict:
-            nearby_pokemon = len(nearby_pokemon_dict)
-            nearby_encounter_ids = [p['encounter_id'] for p in nearby_pokemon_dict]
-            # For all the wild Pokemon we found check if an active Pokemon is in
-            # the database.
-            with PokestopMember.database().execution_context():
-                query = (PokestopMember
-                         .select(PokestopMember.encounter_id, PokestopMember.pokestop_id)
-                         .where((PokestopMember.disappear_time >= now_date) &
-                                (PokestopMember.encounter_id << nearby_encounter_ids))
-                         .dicts())
+                    if (not SpawnPoint.tth_found(sp) or sighting['tth_secs']):
+                        SpawnpointDetectionData.classify(sp, scan_location, now_secs,
+                                                         sighting)
+                        sightings[p.encounter_id] = sighting
 
-                # Store all encounter_ids and spawnpoint_ids for the Pokemon in
-                # query.
-                # All of that is needed to make sure it's unique.
-                nearby_encountered_pokemon = [
-                    (p['encounter_id'], p['pokestop_id']) for p in query]
+                    sp['last_scanned'] = datetime.utcnow()
 
-            for p in nearby_pokemon_dict:
-                pokestop_id = p['fort_id']
-                if ((p['encounter_id'], pokestop_id) in nearby_encountered_pokemon):
-                    # If Pokemon has been encountered before don't process it.
-                    skipped += 1
-                    continue
+                    start_end = SpawnPoint.start_end(sp, 1)
+                    seconds_until_despawn = (start_end[1] - now_secs) % 3600
+                    disappear_time = now_date + timedelta(seconds=seconds_until_despawn)
 
-                disappear_time = now_date + timedelta(seconds=600)
+                    pokemon_id = _POKEMONID.values_by_name[wildpokemon['pokemonData']['pokemonId']].number
 
-                pokemon_id = p['pokemon_id']
+                    gender = _GENDER.values_by_name[wildpokemon['pokemonData']["pokemonDisplay"].get('gender', 'GENDER_UNSET')].number
+                    costume = _COSTUME.values_by_name[wildpokemon['pokemonData']["pokemonDisplay"].get('costume', 'COSTUME_UNSET')].number
+                    form = _FORM.values_by_name[wildpokemon['pokemonData']["pokemonDisplay"].get('form', 'FORM_UNSET')].number
+                    weather = _WEATHERCONDITION.values_by_name[wildpokemon['pokemonData']["pokemonDisplay"].get('weatherBoostedCondition', 'NONE')].number
 
-                distance = round(p.get('distance', 0), 5)
+                    printPokemon(pokemon_id, wildpokemon['latitude'], wildpokemon['longitude'],
+                                 disappear_time)
 
-                nearby_pokemons[p['encounter_id']] = {
-                    'encounter_id': p['encounter_id'],
-                    'pokestop_id' : p['fort_id'],
-                    'pokemon_id': pokemon_id,
-                    'disappear_time': disappear_time,
-                    'gender': p['gender'],
-                    'costume': p['costume'],
-                    'form': p.get('form', 0),
-                    'weather_boosted_condition': p.get('weather', None),
-                    'distance': distance
-                }
-                if nearby_pokemons[p['encounter_id']]['costume'] < -1:
-                    nearby_pokemons[p['encounter_id']]['costume'] = -1
-                if nearby_pokemons[p['encounter_id']]['form'] < -1:
-                    nearby_pokemons[p['encounter_id']]['form'] = -1
+                    pokemon[wildpokemon['encounterId']] = {
+                        'encounter_id': wildpokemon['encounterId'],
+                        'spawnpoint_id': spawn_id,
+                        'pokemon_id': pokemon_id,
+                        'latitude': wildpokemon['latitude'],
+                        'longitude': wildpokemon['longitude'],
+                        'disappear_time': disappear_time,
+                        'individual_attack': wildpokemon['pokemonData']['individualAttack'],
+                        'individual_defense': wildpokemon['pokemonData']['individualDefense'],
+                        'individual_stamina': wildpokemon['pokemonData']['individualStamina'],
+                        'move_1': _POKEMONMOVE.values_by_name[wildpokemon['pokemonData']['move1']].number,
+                        'move_2': _POKEMONMOVE.values_by_name[wildpokemon['pokemonData']['move2']].number,
+                        'cp': wildpokemon['pokemonData']['cp'],
+                        'cp_multiplier': wildpokemon['pokemonData']['cpMultiplier'],
+                        'height': wildpokemon['pokemonData']['heightM'],
+                        'weight': wildpokemon['pokemonData']['weightKg'],
+                        'gender': gender,
+                        'costume': costume,
+                        'form': form,
+                        'weather_boosted_condition': weather
+                    }
+
+                    if 'pokemon-iv' in self.args.wh_types:
+                        if (pokemon_id in self.args.webhook_whitelist or
+                            (not self.args.webhook_whitelist and pokemon_id
+                             not in self.args.webhook_blacklist)):
+                            wh_poke = pokemon[wildpokemon['encounterId']].copy()
+                            wh_poke.update({
+                                'disappear_time': calendar.timegm(
+                                    disappear_time.timetuple()),
+                                'last_modified_time': now(),
+                                'time_until_hidden_ms': float(wildpokemon.get('timeTillHiddenMs', 0)),
+                                'verified': SpawnPoint.tth_found(sp),
+                                'seconds_until_despawn': seconds_until_despawn,
+                                'spawn_start': start_end[0],
+                                'spawn_end': start_end[1],
+                                'player_level': int(trainerlvl),
+                                'individual_attack': wildpokemon['pokemonData']['individualAttack'],
+                                'individual_defense': wildpokemon['pokemonData']['individualDefense'],
+                                'individual_stamina': wildpokemon['pokemonData']['individualStamina'],
+                                'move_1': _POKEMONMOVE.values_by_name[wildpokemon['pokemonData']['move1']].number,
+                                'move_2': _POKEMONMOVE.values_by_name[wildpokemon['pokemonData']['move2']].number,
+                                'cp': wildpokemon['pokemonData']['cp'],
+                                'cp_multiplier': wildpokemon['pokemonData']['cpMultiplier'],
+                                'height': wildpokemon['pokemonData']['heightM'],
+                                'weight': wildpokemon['pokemonData']['weightKg'],
+                                'weather_id': weather
+                            })
+
+                            rarity = self.get_pokemon_rarity_code(pokemon_id)
+                            wh_poke.update({
+                                'rarity': rarity
+                            })
+
+                            self.wh_update_queue.put(('pokemon', wh_poke))
 
         log.info('Parsing found Pokemon: %d (%d filtered), nearby: %d, ' +
-                 'pokestops: %d, gyms: %d, raids: %d.',
+                 'pokestops: %d, gyms: %d, raids: %d, quests: %d.',
                  len(pokemon) + skipped,
                  filtered,
-                 nearby_pokemon,
+                 len(nearby_pokemons),
                  len(pokestops) + stopsskipped,
                  len(gyms),
-                 len(raids))
+                 len(raids),
+                 len(quest_result))
 
         self.db_update_queue.put((ScannedLocation, {0: scan_location}))
 
@@ -847,6 +1229,8 @@ class Pogom(Flask):
             self.db_update_queue.put((Pokemon, pokemon))
         if pokestops:
             self.db_update_queue.put((Pokestop, pokestops))
+        if pokestop_details:
+            self.db_update_queue.put((PokestopDetails, pokestop_details))
         if gyms:
             self.db_update_queue.put((Gym, gyms))
         if gym_details:
@@ -860,6 +1244,8 @@ class Pogom(Flask):
                 self.db_update_queue.put((SpawnpointDetectionData, sightings))
         if nearby_pokemons:
             self.db_update_queue.put((PokestopMember, nearby_pokemons))
+        if quest_result:
+            self.db_update_queue.put((Quest, quest_result))
 
         return 'ok'
 
@@ -944,6 +1330,8 @@ class Pogom(Flask):
         scan_display = False
 
         visibility_flags = {
+            'geofences': bool(args.geofence_file or
+                              args.geofence_excluded_file),
             'gyms': not args.no_gyms,
             'pokemons': not args.no_pokemon,
             'pokestops': not args.no_pokestops,
@@ -1191,6 +1579,29 @@ class Pogom(Flask):
                     d['main_workers'] = MainWorker.get_all()
                     d['workers'] = WorkerStatus.get_all()
 
+        if request.args.get('geofences', 'true') == 'true':
+            db_geofences = Geofence.get_geofences()
+
+            geofences = {}
+            for g in db_geofences:
+                # Check if already there
+                geofence = geofences.get(g['name'], None)
+                if not geofence:  # Create a new sub-dict if new
+                    geofences[g['name']] = {
+                        'excluded': g['excluded'],
+                        'name': g['name'],
+                        'coordinates': []
+                    }
+                coordinate = {
+                    'lat': g['latitude'],
+                    'lng': g['longitude']
+                }
+                geofences[g['name']]['coordinates'].append(coordinate)
+
+            d['geofences'] = geofences
+
+        d['deviceworkers'] = DeviceWorker.get_active()
+
         return jsonify(d)
 
     def loc(self):
@@ -1223,6 +1634,246 @@ class Pogom(Flask):
             needtojump = True
 
         return self.scan_loc(needtojump)
+
+    def walk_spawnpoint(self):
+        request_json = request.get_json()
+
+        uuid = request_json.get('uuid')
+        if uuid == "":
+            return ""
+
+        lat = float(request_json.get('latitude', request_json.get('latitude:', 0)))
+        lng = float(request_json.get('longitude', request_json.get('longitude:', 0)))
+
+        latitude = round(lat, 5)
+        longitude = round(lng, 5)
+
+        deviceworker = DeviceWorker.get_by_id(uuid, latitude, longitude)
+
+        if uuid not in self.deviceschedules:
+            self.deviceschedules[uuid] = []
+
+        last_updated = deviceworker['last_updated']
+        difference = (datetime.utcnow() - last_updated).total_seconds()
+        if difference > self.args.scheduletimeout * 60 or deviceworker['fetch'] != "walk_spawnpoint":
+            self.deviceschedules[uuid] = []
+
+        if len(self.deviceschedules[uuid]) == 0:
+            self.deviceschedules[uuid] = SpawnPoint.get_nearby_spawnpoints(latitude, longitude, self.args.maxradius)
+            nextlatitude = latitude
+            nextlongitude = longitude
+            if len(self.deviceschedules[uuid]) == 0:
+                return self.scan_loc()
+        else:
+            nextlatitude = deviceworker['latitude']
+            nextlongitude = deviceworker['longitude']
+
+        nexttarget = self.deviceschedules[uuid][0]
+
+        if nextlatitude == nexttarget[0] and nextlongitude == nexttarget[1]:
+            if len(self.deviceschedules[uuid]) > 0:
+                del self.deviceschedules[uuid][0]
+
+        if nextlatitude < nexttarget[0]:
+            if nexttarget[0] - nextlatitude >= self.args.stepsize:
+                nextlatitude = nextlatitude + self.args.stepsize
+            else:
+                nextlatitude = nexttarget[0]
+        else:
+            if nextlatitude - nexttarget[0] >= self.args.stepsize:
+                nextlatitude = nextlatitude - self.args.stepsize
+            else:
+                nextlatitude = nexttarget[0]
+
+        if nextlongitude < nexttarget[1]:
+            if nexttarget[1] - nextlongitude >= self.args.stepsize:
+                nextlongitude = nextlongitude + self.args.stepsize
+            else:
+                nextlongitude = nexttarget[1]
+        else:
+            if nextlongitude - nexttarget[1] >= self.args.stepsize:
+                nextlongitude = nextlongitude - self.args.stepsize
+            else:
+                nextlongitude = nexttarget[1]
+
+        if nextlatitude == nexttarget[0] and nextlongitude == nexttarget[1]:
+            if len(self.deviceschedules[uuid]) > 0:
+                del self.deviceschedules[uuid][0]
+
+        deviceworker['latitude'] = round(nextlatitude, 5)
+        deviceworker['longitude'] = round(nextlongitude, 5)
+        deviceworker['last_updated'] = datetime.utcnow()
+        deviceworker['fetch'] = "walk_spawnpoint"
+
+        deviceworkers = {}
+        deviceworkers[uuid] = deviceworker
+
+        self.db_update_queue.put((DeviceWorker, deviceworkers))
+
+        scan_location = ScannedLocation.get_by_loc([deviceworker['latitude'], deviceworker['longitude']])
+        ScannedLocation.update_band(scan_location, deviceworker['last_updated'])
+        self.db_update_queue.put((ScannedLocation, {0: scan_location}))
+
+        d = {}
+        d['latitude'] = deviceworker['latitude']
+        d['longitude'] = deviceworker['longitude']
+
+        return jsonify(d)
+
+    def walk_pokestop(self):
+        request_json = request.get_json()
+
+        uuid = request_json.get('uuid')
+        if uuid == "":
+            return ""
+
+        lat = float(request_json.get('latitude', request_json.get('latitude:', 0)))
+        lng = float(request_json.get('longitude', request_json.get('longitude:', 0)))
+
+        latitude = round(lat, 5)
+        longitude = round(lng, 5)
+
+        deviceworker = DeviceWorker.get_by_id(uuid, latitude, longitude)
+
+        if uuid not in self.deviceschedules:
+            self.deviceschedules[uuid] = []
+
+        last_updated = deviceworker['last_updated']
+        difference = (datetime.utcnow() - last_updated).total_seconds()
+        if difference > self.args.scheduletimeout * 60 or deviceworker['fetch'] != "walk_pokestop":
+            self.deviceschedules[uuid] = []
+
+        if len(self.deviceschedules[uuid]) == 0:
+            self.deviceschedules[uuid] = Pokestop.get_nearby_pokestops(latitude, longitude, self.args.maxradius)
+            nextlatitude = latitude
+            nextlongitude = longitude
+            if len(self.deviceschedules[uuid]) == 0:
+                return self.scan_loc()
+        else:
+            nextlatitude = deviceworker['latitude']
+            nextlongitude = deviceworker['longitude']
+
+        nexttarget = self.deviceschedules[uuid][0]
+
+        if nextlatitude == nexttarget[0] and nextlongitude == nexttarget[1]:
+            if len(self.deviceschedules[uuid]) > 0:
+                del self.deviceschedules[uuid][0]
+
+        if nextlatitude < nexttarget[0]:
+            if nexttarget[0] - nextlatitude >= self.args.stepsize:
+                nextlatitude = nextlatitude + self.args.stepsize
+            else:
+                nextlatitude = nexttarget[0]
+        else:
+            if nextlatitude - nexttarget[0] >= self.args.stepsize:
+                nextlatitude = nextlatitude - self.args.stepsize
+            else:
+                nextlatitude = nexttarget[0]
+
+        if nextlongitude < nexttarget[1]:
+            if nexttarget[1] - nextlongitude >= self.args.stepsize:
+                nextlongitude = nextlongitude + self.args.stepsize
+            else:
+                nextlongitude = nexttarget[1]
+        else:
+            if nextlongitude - nexttarget[1] >= self.args.stepsize:
+                nextlongitude = nextlongitude - self.args.stepsize
+            else:
+                nextlongitude = nexttarget[1]
+
+        if nextlatitude == nexttarget[0] and nextlongitude == nexttarget[1]:
+            if len(self.deviceschedules[uuid]) > 0:
+                del self.deviceschedules[uuid][0]
+
+        deviceworker['latitude'] = round(nextlatitude, 5)
+        deviceworker['longitude'] = round(nextlongitude, 5)
+        deviceworker['last_updated'] = datetime.utcnow()
+        deviceworker['fetch'] = "walk_pokestop"
+
+        deviceworkers = {}
+        deviceworkers[uuid] = deviceworker
+
+        self.db_update_queue.put((DeviceWorker, deviceworkers))
+
+        scan_location = ScannedLocation.get_by_loc([deviceworker['latitude'], deviceworker['longitude']])
+        ScannedLocation.update_band(scan_location, deviceworker['last_updated'])
+        self.db_update_queue.put((ScannedLocation, {0: scan_location}))
+
+        d = {}
+        d['latitude'] = deviceworker['latitude']
+        d['longitude'] = deviceworker['longitude']
+
+        return jsonify(d)
+
+    def teleport_gym(self):
+        request_json = request.get_json()
+
+        uuid = request_json.get('uuid')
+        if uuid == "":
+            return ""
+
+        lat = float(request_json.get('latitude', request_json.get('latitude:', 0)))
+        lng = float(request_json.get('longitude', request_json.get('longitude:', 0)))
+
+        latitude = round(lat, 5)
+        longitude = round(lng, 5)
+
+        deviceworker = DeviceWorker.get_by_id(uuid, latitude, longitude)
+
+        if uuid not in self.deviceschedules:
+            self.deviceschedules[uuid] = []
+
+        last_updated = deviceworker['last_updated']
+        difference = (datetime.utcnow() - last_updated).total_seconds()
+        if difference > self.args.scheduletimeout * 60 or deviceworker['fetch'] != "teleport_gym":
+            self.deviceschedules[uuid] = []
+
+        if len(self.deviceschedules[uuid]) == 0:
+            self.deviceschedules[uuid] = Gym.get_nearby_gyms(latitude, longitude, self.args.maxradius)
+            nextlatitude = latitude
+            nextlongitude = longitude
+            if len(self.deviceschedules[uuid]) == 0:
+                return self.scan_loc()
+        else:
+            nextlatitude = deviceworker['latitude']
+            nextlongitude = deviceworker['longitude']
+
+        nexttarget = self.deviceschedules[uuid][0]
+
+        if nextlatitude == nexttarget[0] and nextlongitude == nexttarget[1]:
+            if len(self.deviceschedules[uuid]) > 0:
+                del self.deviceschedules[uuid][0]
+
+        else:
+            nextlatitude = nexttarget[0]
+            nextlongitude = nexttarget[1]
+
+        if nextlatitude == nexttarget[0] and nextlongitude == nexttarget[1]:
+            if len(self.deviceschedules[uuid]) > 0:
+                del self.deviceschedules[uuid][0]
+
+        last_updated = deviceworker['last_updated']
+        difference = (datetime.utcnow() - last_updated).total_seconds()
+        if difference >= 60:
+            deviceworker['latitude'] = round(nextlatitude, 5)
+            deviceworker['longitude'] = round(nextlongitude, 5)
+            deviceworker['last_updated'] = datetime.utcnow()
+            deviceworker['fetch'] = "teleport_gym"
+
+            deviceworkers = {}
+            deviceworkers[uuid] = deviceworker
+
+            self.db_update_queue.put((DeviceWorker, deviceworkers))
+
+            scan_location = ScannedLocation.get_by_loc([deviceworker['latitude'], deviceworker['longitude']])
+            ScannedLocation.update_band(scan_location, deviceworker['last_updated'])
+            self.db_update_queue.put((ScannedLocation, {0: scan_location}))
+
+        d = {}
+        d['latitude'] = deviceworker['latitude']
+        d['longitude'] = deviceworker['longitude']
+
+        return jsonify(d)
 
     def scan_loc(self, needtojump=False):
         request_json = request.get_json()
@@ -1327,7 +1978,7 @@ class Pogom(Flask):
                 direction = "U"
                 currentlatitude += self.args.stepsize
 
-        if self.args.maxradius > 0 and radius > self.args.maxradius:
+        if self.args.maxradius > 0 and geopy.distance.vincenty((currentlatitude, currentlongitude), (centerlatitude, centerlongitude)).km > self.args.maxradius:
             currentlatitude = centerlatitude
             currentlongitude = centerlongitude
             radius = 0
@@ -1342,6 +1993,7 @@ class Pogom(Flask):
         deviceworker['step'] = step
         deviceworker['direction'] = direction
         deviceworker['last_updated'] = datetime.utcnow()
+        deviceworker['fetch'] = "teleport_loc" if needtojump else "scan_loc"
 
         deviceworkers = {}
         deviceworkers[uuid] = deviceworker
@@ -1461,6 +2113,12 @@ class Pogom(Flask):
         pokestop = Pokestop.get_stop(pokestop_id)
 
         return jsonify(pokestop)
+
+    def get_deviceworkerdata(self):
+        deviceworker_id = request.args.get('id')
+        deviceworker = DeviceWorker.get_active_by_id(deviceworker_id)
+
+        return jsonify(deviceworker)
 
 
 class CustomJSONEncoder(JSONEncoder):

@@ -1085,6 +1085,10 @@ var StoreOptions = {
     'isSearchMarkerMovable': {
         default: false,
         type: StoreTypes.Boolean
+    },
+    'showGeofences': {
+        default: false,
+        type: StoreTypes.Boolean
     }
 }
 
@@ -1313,8 +1317,6 @@ function updatePokemonMarker(item, map, scaleByRarity = true, isNotifyPkmn = fal
         url: markerImage,
         scaledSize: new google.maps.Size(38, 38)
     })
-
-
 }
 
 function updatePokemonLabel(item) {
