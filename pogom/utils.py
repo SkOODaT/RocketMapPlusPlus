@@ -640,11 +640,11 @@ def get_pokemon_name(pokemon_id):
 
 def get_quest_icon(reward_type, reward_item):
     result = ""
-    if reward_type == "POKEMON_ENCOUNTER":
+    if reward_type == "POKEMON_ENCOUNTER" and reward_item is not None:
         result = str(_POKEMONID.values_by_name[reward_item].number)
     elif reward_type == "STARDUST":
         result = "STARDUST"
-    else:
+    elif reward_item is not None:
         result = reward_item
     return result
 
@@ -1125,28 +1125,35 @@ def device_worker_refresher(db_update_queue, wh_update_queue, args):
                     needtosend = True
                     log.info("Device stopped fetching: " + worker['deviceid'])
                 last_scanned = worker['last_scanned']
-                difference = (datetime.utcnow() - last_scanned).total_seconds()
-                if difference < 60 and worker['scanning'] == 0:
-                    worker['scanning'] = 1
+                if last_scanned is None and worker['scanning'] != -1:
+                    worker['scanning'] = -1
                     updateworkers[worker['deviceid']] = worker
                     needtosend = True
-                    log.info("Device is scanning " + worker['deviceid'])
-                elif difference > 60 and worker['scanning'] == 1:
-                    worker['scanning'] = 0
-                    updateworkers[worker['deviceid']] = worker
-                    needtosend = True
-                    log.info("Device went idle " + worker['deviceid'])
-                if worker['fetch'] != workers[worker['deviceid']]['fetch']:
-                    needtosend = True
-                    log.info("Device changed fetching endpoint: " + worker['deviceid'])
-                if worker['scanning'] != workers[worker['deviceid']]['scanning']:
-                    needtosend = True
-                    log.info("Device changed scanning status: " + worker['deviceid'])
+                    log.info("Device has never scanned " + worker['deviceid'])
+                else:
+                    difference = (datetime.utcnow() - last_scanned).total_seconds()
+                    if difference < 60 and worker['scanning'] == 0:
+                        worker['scanning'] = 1
+                        updateworkers[worker['deviceid']] = worker
+                        needtosend = True
+                        log.info("Device is scanning " + worker['deviceid'])
+                    elif difference > 60 and worker['scanning'] == 1:
+                        worker['scanning'] = 0
+                        updateworkers[worker['deviceid']] = worker
+                        needtosend = True
+                        log.info("Device went idle " + worker['deviceid'])
+                    if worker['fetch'] != workers[worker['deviceid']]['fetch']:
+                        needtosend = True
+                        log.info("Device changed fetching endpoint: " + worker['deviceid'])
+                    if worker['scanning'] != workers[worker['deviceid']]['scanning']:
+                        needtosend = True
+                        log.info("Device changed scanning status: " + worker['deviceid'])
             workers[worker['deviceid']] = worker.copy()
 
             if needtosend and 'devices' in args.wh_types:
                 wh_worker = {
                     'uuid': worker['deviceid'],
+                    'name': worker['name'],
                     'fetch': worker['fetch'],
                     'scanning': worker['scanning']
                 }
